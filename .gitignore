@@ -1,0 +1,17 @@
+# Ignore specific file types
+*.xlsx
+*.csv
+*.log
+*.exe
+*.bak
+*.html
+*.json
+*.js
+
+# Ignore directories
+__pycache__/
+.git/
+.vscode/
+
+# Allow some specific non-code files if needed, but for now just python files
+!*.py

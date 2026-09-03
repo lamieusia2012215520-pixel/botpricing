@@ -1,0 +1,52 @@
+Carrier: CMA / ANL / CNC / APL
+  [09:08:30] [CMA / ANL / CNC / APL] [09:08:30.049]       [WARN] Hết 0.8s Polling không tìm thấy nút Available, tiếp tục kịch bản...
+
+  [09:09:56] [CMA / ANL / CNC / APL] [09:09:56.602]       [WARN] Hết 0.8s Polling không tìm thấy nút Available, tiếp tục kịch bản...
+
+  [09:11:21] [CMA / ANL / CNC / APL] [09:11:21.797]       [WARN] Hết 0.8s Polling không tìm thấy nút Available, tiếp tục kịch bản...
+
+  [09:12:09] [CMA / ANL / CNC / APL] [09:12:09.874]       [WARN] Hết 0.8s Polling không tìm thấy nút Available, tiếp tục kịch bản...
+
+  [09:13:10] [CMA / ANL / CNC / APL] [09:13:10.538]       ❌ Form chưa nhận Commodity; không bấm Get Quote để tránh ghi nhầm Sold Out.
+
+  [09:13:14] [CMA / ANL / CNC / APL] [09:13:14.525]    -> Nạp trang quote CMA (form_error retry row 31)...
+
+  [09:14:37] [CMA / ANL / CNC / APL] [09:14:37.184]       ❌ Form chưa nhận Commodity; không bấm Get Quote để tránh ghi nhầm Sold Out.
+
+Carrier: COSCO
+  [09:11:21] [COSCO] [09:11:21.950]       -> [Synconhub] NO SERVICE / SOLD OUT!
+
+  [09:12:25] [COSCO] [09:12:25.456]       -> [Synconhub] NO SERVICE / SOLD OUT!
+
+  [09:13:26] [COSCO] [09:13:26.065]         ⚠️ [BỎ QUA] Phí ARB không có giá tiền (Rỗng).
+
+  [09:13:26] [COSCO] [09:13:26.065]         ⚠️ [BỎ QUA] Phí ARB không có giá tiền (Rỗng).
+
+  [09:13:26] [COSCO] [09:13:26.065]         ⚠️ [BỎ QUA] Phí ARB không có giá tiền (Rỗng).
+
+  [09:13:49] [COSCO] [09:13:49.441]       -> [Synconhub] NO SERVICE / SOLD OUT!
+
+Carrier: ONE
+  [09:16:18] [ONE] [09:16:18.506]       [ONE-API] location query 'HAI PHONG' lỗi: TimeoutException
+
+  [09:16:48] [ONE] [09:16:48.527]       [ONE-API] location query 'PIPAVAV' lỗi: TimeoutException
+
+Carrier: MSC
+  [09:16:44] [MSC] [09:16:44.377] ACCESS DENIED ERROR: Access denied on load. Logging out and restarting row 16...
+
+Carrier: HMM
+  [09:17:36] [HMM] [HMM]    SKIP: NO BOOKABLE PRICE -> de trong
+
+Carrier: KMTC
+  [09:17:45] [KMTC] [09:17:45.712]    [Sched-API] ⚠️ Retry tháng 08/2026 (lỗi: )
+
+  [09:17:46] [KMTC] [09:17:46.906]    [Sched-API] ⚠️ Lỗi API tháng 08/2026: 
+
+  [09:17:47] [KMTC] [09:17:47.244]    [Sched-API] ⚠️ Retry tháng 09/2026 (lỗi: )
+
+  [09:17:49] [KMTC] [09:17:49.449]    [Sched-API] ⚠️ Lỗi API tháng 09/2026: 
+
+  [09:17:49] [KMTC] [09:17:49.889]    [Sched-API] ⚠️ Retry tháng 10/2026 (lỗi: )
+
+  [09:17:51] [KMTC] [09:17:51.100]    [Sched-API] ⚠️ Lỗi API tháng 10/2026: 
+
