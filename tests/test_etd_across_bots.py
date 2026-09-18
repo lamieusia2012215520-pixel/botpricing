@@ -1,7 +1,7 @@
 import ast
 import unittest
 from datetime import date, datetime
-from bot_cli import format_etd_dates_excel
+from bot_cli import format_etd_dates_excel, format_transit_time_excel
 
 
 class ETDFormattingTests(unittest.TestCase):
@@ -65,6 +65,22 @@ class ETDFormattingTests(unittest.TestCase):
         entries = ["2026-09-26", "2026-09-30", "2026-10-02"]
         self.assertEqual(format_etd_dates_excel(entries), "26, 30-Sep & 2-Oct")
 
+
+
+class TransitTimeFormattingTests(unittest.TestCase):
+    def test_transit_time_ascending_order(self):
+        # User's exact reported case: 57 and 46 -> 46-57
+        self.assertEqual(format_transit_time_excel([57, 46]), '46-57')
+        self.assertEqual(format_transit_time_excel([46, 57]), '46-57')
+        self.assertEqual(format_transit_time_excel([57, 42, 46]), '42-57')
+
+    def test_single_or_identical_transit_time(self):
+        self.assertEqual(format_transit_time_excel([45]), '45')
+        self.assertEqual(format_transit_time_excel([45, 45, 45]), '45')
+
+    def test_transit_time_string_or_dict(self):
+        self.assertEqual(format_transit_time_excel(['57 days', '46 days']), '46-57')
+        self.assertEqual(format_transit_time_excel([{'transit': 57}, {'transit': 46}]), '46-57')
 
 class AllBotsUseUniversalFormatterTests(unittest.TestCase):
     """Verify statically that all carrier bots import and use format_etd_dates_excel."""

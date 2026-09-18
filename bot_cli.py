@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 from datetime import date as date_type
@@ -137,3 +138,29 @@ def format_etd_dates_excel(dates_or_entries):
         return parts[0]
     return f"{', '.join(parts[:-1])} & {parts[-1]}"
 
+
+
+def format_transit_time_excel(transits):
+    """
+    Format transit time range as 'min-max' (e.g. 46-57) or single value (e.g. 46).
+    Always ensures ascending order: smaller number first, larger number second.
+    """
+    if not transits:
+        return ""
+    vals = []
+    for item in transits:
+        if isinstance(item, dict):
+            val = item.get("transit") if "transit" in item else item.get("tt_days", item.get("tt"))
+        else:
+            val = item
+        if val is not None:
+            try:
+                m = re.search(r"\d+", str(val))
+                if m:
+                    vals.append(int(m.group()))
+            except Exception:
+                pass
+    if not vals:
+        return ""
+    low, high = min(vals), max(vals)
+    return str(low) if low == high else f"{low}-{high}"

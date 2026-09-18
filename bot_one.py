@@ -29,6 +29,7 @@ from bot_cli import (
     max_etd_date,
     max_etd_date_only,
     format_etd_dates_excel,
+    format_transit_time_excel,
 )
 from remark_rules import apply_manifest_rule, get_manifest_code, is_china_destination
 
@@ -1608,8 +1609,7 @@ def one_api_format_result(row_data, candidates):
         return {"POL": row_data[2], "POD": row_data[3], "Status": "No Valid ETD"}
 
     etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
-    transits = [c["transit"] for c in final_sels]
-    transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"
+    transit_excel = format_transit_time_excel([c["transit"] for c in final_sels])
     valid_excel = get_valid_date([c["etd"] for c in final_sels])
     target, fi = final_sels[0], final_sels[0]["freight_info"]
     debug_charges = os.environ.get("ONE_DEBUG_CHARGES", "0").strip().lower() in {"1", "true", "yes", "y"}
@@ -2299,8 +2299,7 @@ def scrape_tab(row_data):
     # Format Excel
     etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
 
-    transits      = [c["transit"] for c in final_sels]
-    transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"
+    transit_excel = format_transit_time_excel([c["transit"] for c in final_sels])
     valid_excel   = get_valid_date([c["etd"] for c in final_sels])
 
     # ── TÌM LẠI ELEMENT CỦA target_card BẰNG INDEX (tránh stale) ──
@@ -2325,8 +2324,7 @@ def scrape_tab(row_data):
     # Format Excel
     etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
 
-    transits      = [c["transit"] for c in final_sels]
-    transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"
+    transit_excel = format_transit_time_excel([c["transit"] for c in final_sels])
     valid_excel   = get_valid_date([c["etd"] for c in final_sels])
 
     # Bóc phí Details
