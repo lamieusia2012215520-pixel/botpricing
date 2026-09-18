@@ -15,7 +15,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException, NoSuchWindowException
+from selenium.common.exceptions import TimeoutException, NoSuchWindowException, StaleElementReferenceException
 from selenium.webdriver.common.action_chains import ActionChains
 import subprocess
 import os
@@ -28,6 +28,25 @@ from remark_rules import apply_manifest_rule, get_manifest_code, is_china_destin
 
 DATE_OFFSET_DAYS = parse_date_offset_days()
 DRIVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "msedgedriver.exe")
+
+
+def one_calendar_price_dates(driver, xpath):
+    """Read calendar prices despite React replacing date cells during rendering."""
+    for attempt in range(2):
+        priced = []
+        stale = False
+        for cell in driver.find_elements(By.XPATH, xpath):
+            try:
+                if re.search(r"\d+(?:\.\d+)?K\b", cell.text or "", re.IGNORECASE):
+                    priced.append(cell)
+            except StaleElementReferenceException:
+                stale = True
+                break
+        if not stale:
+            return priced
+        if attempt == 0:
+            time.sleep(0.2)
+    return []
 
 def _excel_formula_from_parts(parts):
     tokens = []
@@ -1123,103 +1142,20 @@ ONE_EQUIPMENT_TARGETS = {
     "DRY 40H": {"iso": "45G1", "fallback_size": "40H", "fallback_one": "D5"},
 }
 
-ONE_ORIGIN_LOCAL_EXCLUDED_KEYWORDS = (
-    "terminal handling charge (l)",
-    "terminal handling charge at origin",
-    "terminal handling charge at port of loading",
-    "thc/l",
-    "thc at origin",
-    "doc fee (origin)",
-    "document fee",
-    "bill of lading",
-    "b/l fee",
-    "bl fee",
-    "seal fee",
-    "seal charge",
-    "entry summary declaration surcharge",
-    "advanced manifest",
-    "manifest declaration",
-    "manifest fee",
-    "customs manifest submission fee",
-    "ams",
-    "ens",
-    "afs",
-    "afr",
-    "heavy surcharge",
-    "heavy lift",
-    "overweight",
-    "ows",
+from one_logic import (
+    ONE_ORIGIN_LOCAL_EXCLUDED_KEYWORDS,
+    ONE_ORIGIN_LOCAL_EXCLUDED_CODES,
+    ONE_DISCOUNT_KEYWORDS,
+    ONE_DISCOUNT_CODES,
+    one_fee_name,
+    one_fee_code,
+    one_is_discount_charge,
+    one_is_origin_local_charge,
+    one_is_origin_thc_charge,
+    one_is_ows_charge,
+    one_should_include_charge,
+    one_api_charge_equipment_key,
 )
-
-ONE_ORIGIN_LOCAL_EXCLUDED_CODES = {
-    "THC", "THCL", "OTHC", "DOC", "BLF", "BLC", "SEAL", "SLF",
-    "AMS", "ENS", "AFS", "AFR", "EST", "OWS", "HWC", "HLC", "OOG",
-}
-
-def one_fee_name(charge_or_text):
-    if isinstance(charge_or_text, dict):
-        return str(charge_or_text.get("chargeName") or "").strip().lower()
-    return str(charge_or_text or "").strip().lower()
-
-def one_fee_code(charge):
-    if isinstance(charge, dict):
-        return str(charge.get("chargeCode") or "").strip().upper()
-    return ""
-
-def one_is_origin_local_charge(fee_name, charge_code=""):
-    fee = one_fee_name(fee_name)
-    code = str(charge_code or "").strip().upper()
-    if any(k in fee for k in ONE_ORIGIN_LOCAL_EXCLUDED_KEYWORDS):
-        return True
-    return bool(code and code in ONE_ORIGIN_LOCAL_EXCLUDED_CODES)
-
-def one_is_origin_thc_charge(fee_name, charge_code=""):
-    fee = one_fee_name(fee_name)
-    code = str(charge_code or "").strip().upper()
-    return (
-        code in {"THC", "THCL", "OTHC"}
-        or "terminal handling charge (l)" in fee
-        or "terminal handling charge at origin" in fee
-        or "terminal handling charge at port of loading" in fee
-        or "thc/l" in fee
-        or "thc at origin" in fee
-    )
-
-def one_is_ows_charge(fee_name, charge_code=""):
-    """OWS/Heavy chỉ dùng để tạo remark, không được cộng vào giá."""
-    fee = one_fee_name(fee_name)
-    code = str(charge_code or "").strip().upper()
-    return (
-        code in {"OWS", "HWC", "HLC"}
-        or "heavy surcharge" in fee
-        or "heavy lift" in fee
-        or "overweight" in fee
-        or re.search(r"\bows\b", fee) is not None
-    )
-
-def one_should_include_charge(fee_name, group="", charge_code="", include_origin_thc=False):
-    fee = one_fee_name(fee_name)
-    group = str(group or "").strip()
-    code = str(charge_code or "").strip().upper()
-    if not fee:
-        return False
-    # OWS có thể nằm trong premiumCharges/freightCharges chứ không chỉ
-    # originCharges. Luôn loại khỏi tổng, nhưng caller vẫn bật cờ remark.
-    if one_is_ows_charge(fee, code):
-        return False
-    if group == "basicOceanFreightCharges":
-        return True
-    if group == "originCharges":
-        if include_origin_thc and one_is_origin_thc_charge(fee, code):
-            return True
-        return not one_is_origin_local_charge(fee, code)
-    if group == "destinationCharges":
-        return False
-    if not group:
-        if include_origin_thc and one_is_origin_thc_charge(fee, code):
-            return True
-        return not one_is_origin_local_charge(fee, code)
-    return True
 
 def one_selenium_charge_group(ul):
     try:
@@ -1253,36 +1189,83 @@ def one_api_token_exists():
     except Exception:
         return False
 
+class ONEApiRequestError(RuntimeError):
+    """A transport/auth/API failure, distinct from a genuine empty port list."""
+
+
+class ONEApiLocationLookupError(ONEApiRequestError):
+    """Location lookup failed before ONE could determine whether a pair exists."""
+
+
+ONE_HTTP_SESSION = requests.Session()
+
+
+def _sync_one_http_session():
+    """Copy the authenticated ONE browser cookies into a Python HTTP session.
+
+    The current quote page is served from ``www.one-line.com`` while the
+    quotation API remains on ``ecomm.one-line.com``.  Browser ``fetch`` from
+    the new page is therefore subject to a cross-origin failure even though
+    the same API works with the authenticated cookies over HTTP.
+    """
+    cookies = driver.get_cookies()
+    ONE_HTTP_SESSION.cookies.clear()
+    for cookie in cookies or []:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if name and value is not None:
+            # Domainless cookies are intentional here: the API host must
+            # receive the same browser session regardless of where the page
+            # was redirected.
+            ONE_HTTP_SESSION.cookies.set(name, value)
+    return {str(c.get("name")): c.get("value", "") for c in (cookies or []) if c.get("name")}
+
+
 def one_api_request(method, path, payload=None, timeout=None):
     if timeout is None:
         timeout = ONE_API_TIMEOUT_DEFAULT
     url = path if str(path).startswith("http") else ONE_API_BASE + path
-    result = driver.execute_async_script("""
-        const method = arguments[0], url = arguments[1], payload = arguments[2], timeout = arguments[3];
-        const done = arguments[arguments.length - 1];
-        const tokenPair = document.cookie.split('; ').find(x => x.startsWith('accessToken='));
-        const token = tokenPair ? decodeURIComponent(tokenPair.split('=').slice(1).join('=')) : '';
-        const headers = {'Accept': 'application/json'};
-        if (token) headers['Authorization'] = 'Bearer ' + token;
-        if (payload !== null && payload !== undefined) headers['Content-Type'] = 'application/json';
-        let finished = false;
-        const finish = (value) => { if (!finished) { finished = true; done(value); } };
-        const timer = setTimeout(() => finish({ok:false, status:0, error:'ONE API timeout'}), timeout * 1000);
-        fetch(url, {method, headers, credentials:'include',
-            body: (payload !== null && payload !== undefined) ? JSON.stringify(payload) : undefined
-        }).then(async r => {
-            clearTimeout(timer);
-            const text = await r.text();
-            let data = null;
-            try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
-            finish({ok:r.ok, status:r.status, data, text});
-        }).catch(e => { clearTimeout(timer); finish({ok:false, status:0, error:String(e)}); });
-    """, method.upper(), url, payload, timeout)
-    if not isinstance(result, dict) or not result.get("ok"):
-        status = result.get("status") if isinstance(result, dict) else "?"
-        err = result.get("error") or result.get("text") or result.get("data") if isinstance(result, dict) else result
-        raise Exception(f"ONE_API_HTTP_{status}: {err}")
-    return result.get("data")
+    try:
+        browser_cookies = _sync_one_http_session()
+    except Exception as exc:
+        raise ONEApiRequestError(f"ONE_API_SESSION_COOKIES: {type(exc).__name__}: {exc}") from exc
+
+    token = str(browser_cookies.get("accessToken") or "")
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 Edg/124.0"
+        ),
+        "Referer": getattr(driver, "current_url", ONE_URL),
+        "Origin": "https://www.one-line.com",
+    }
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+
+    try:
+        response = ONE_HTTP_SESSION.request(
+            method.upper(),
+            url,
+            json=payload if payload is not None else None,
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise ONEApiRequestError(f"ONE_API_HTTP_0: {type(exc).__name__}: {exc}") from exc
+
+    text = response.text or ""
+    try:
+        data = response.json() if text else None
+    except ValueError:
+        data = text
+    if not response.ok:
+        detail = re.sub(r"\s+", " ", text[:180]).strip()
+        suffix = f": {detail}" if detail else ""
+        raise ONEApiRequestError(f"ONE_API_HTTP_{response.status_code}{suffix}")
+    return data
 
 def one_api_get(path, params=None, timeout=None):
     if params:
@@ -1292,9 +1275,11 @@ def one_api_get(path, params=None, timeout=None):
 def one_api_post(path, payload, timeout=None):
     return one_api_request("POST", path, payload, timeout=timeout)
 
-def one_api_location_candidates(port_name, org_dest, country_name="", allow_trim=False, trim_only=False):
+def one_api_location_candidates(port_name, org_dest, country_name="", allow_trim=False,
+                                trim_only=False, fail_on_api_error=False):
     rows_out = []
     seen = set()
+    api_errors = []
     country = str(country_name or "").strip().upper()
     search_terms = one_port_search_terms(port_name, allow_trim=allow_trim)
     if trim_only and len(search_terms) > 1:
@@ -1303,7 +1288,9 @@ def one_api_location_candidates(port_name, org_dest, country_name="", allow_trim
         try:
             data = one_api_get("/v2/quotation/locations", {"location": name, "orgDest": org_dest, "searchFrom": "mdm"})
         except Exception as e:
-            print(f"      [ONE-API] location query '{name}' lỗi: {type(e).__name__}")
+            error_text = f"{type(e).__name__}: {e}"
+            print(f"      [ONE-API] location query '{name}' lỗi: {error_text}")
+            api_errors.append(error_text)
             continue
         rows = (data or {}).get("data") or []
         if not rows:
@@ -1321,6 +1308,15 @@ def one_api_location_candidates(port_name, org_dest, country_name="", allow_trim
                 continue
             seen.add(key)
             rows_out.append(r)
+
+    # Empty data means the site actually found no matching location.  A failed
+    # request means we do not know that yet, so let the established Selenium
+    # fallback verify it instead of writing '-' immediately.
+    if fail_on_api_error and not rows_out and api_errors:
+        kinds = ", ".join(dict.fromkeys(api_errors))
+        raise ONEApiLocationLookupError(
+            f"ONE_API_LOCATION_LOOKUP_FAILED ({org_dest} {port_name}: {kinds})"
+        )
 
     def score(r):
         hay = f"{r.get('displayedName','')} {r.get('locationName','')} {r.get('countryName','')} {r.get('countryCode','')}".upper()
@@ -1409,11 +1405,15 @@ def one_api_charge_equipment_key(charge):
         return "DRY 20"
     return ""
 
-def one_api_add_charge(final_prices, formula_parts, charge):
+def one_api_add_charge(final_prices, formula_parts, charge, group=""):
     key = one_api_charge_equipment_key(charge)
-    amount = one_api_charge_amount_usd(charge)
-    if abs(amount) < 1e-9:
+    raw_amount = one_api_charge_amount_usd(charge)
+    if abs(raw_amount) < 1e-9:
         return
+
+    fee_name = str(charge.get("chargeName") or "").strip().lower()
+    is_discount = (group == "promotionCharges") or one_is_discount_charge(fee_name, charge)
+    amount = -abs(raw_amount) if is_discount else raw_amount
 
     # Charges such as EST / Customs Manifest Submission Fee are per
     # shipment/B/L and therefore have no equipmentIsoCode.  They still belong
@@ -1628,7 +1628,7 @@ def one_api_format_result(row_data, candidates):
     pod_upper = str(row_data[3]).strip().upper()
     china_route = is_china_destination(country_upper, pod_upper)
     has_thc = has_ens_ams = has_ows = False
-    for group in ["basicOceanFreightCharges", "premiumCharges", "originCharges", "freightCharges", "destinationCharges", "additionalCharges", "inlandCharges"]:
+    for group in ["basicOceanFreightCharges", "promotionCharges", "premiumCharges", "originCharges", "freightCharges", "destinationCharges", "additionalCharges", "inlandCharges"]:
         for charge in fi.get(group) or []:
             fee_name = str(charge.get("chargeName") or "").strip().lower()
             if one_is_origin_thc_charge(fee_name, one_fee_code(charge)): has_thc = True
@@ -1648,7 +1648,7 @@ def one_api_format_result(row_data, candidates):
                 )
             if not include_charge:
                 continue
-            one_api_add_charge(final_prices, formula_parts, charge)
+            one_api_add_charge(final_prices, formula_parts, charge, group=group)
 
     if debug_charges:
         print(
@@ -1686,12 +1686,15 @@ def scrape_one_api(row_data):
         raise Exception("ONE_API_NO_ACCESS_TOKEN")
     country, pol_name, pod_name = str(row_data[0]).strip(), str(row_data[2]).strip(), str(row_data[3]).strip()
     print(f"   [ONE-API] {pol_name} -> {pod_name}")
-    origin_candidates = one_api_location_candidates(pol_name, "origin", country)
-    dest_candidates = one_api_location_candidates(pod_name, "destination", country)
+    origin_candidates = one_api_location_candidates(
+        pol_name, "origin", country, fail_on_api_error=True)
+    dest_candidates = one_api_location_candidates(
+        pod_name, "destination", country, fail_on_api_error=True)
     if not origin_candidates or not dest_candidates:
         return one_no_port_pair_result(row_data)
 
     def probe_one_pair(origin_list, dest_list):
+        api_errors = []
         for o in origin_list[:5]:
             for d in dest_list[:8]:
                 origin_code = o.get("locationCode") or o.get("UNLocationCode")
@@ -1713,15 +1716,24 @@ def scrape_one_api(row_data):
                     return o, d, probe_trips, probe_rows
                 except Exception as e:
                     print(f"      [ONE-API] pair probe lỗi {origin_code}->{dest_code}: {type(e).__name__}")
+                    api_errors.append(type(e).__name__)
                     continue
+        if api_errors:
+            raise ONEApiRequestError(
+                "ONE_API_PAIR_PROBE_FAILED: " + ", ".join(dict.fromkeys(api_errors))
+            )
         return None, None, None, []
 
     origin, dest, trips, trip_rows = probe_one_pair(origin_candidates, dest_candidates)
 
     if not origin or not dest or not trip_rows:
         print("      [ONE-API] full query bị No port pair/no trips -> retry bằng query rút ngắn")
-        origin_candidates = one_api_location_candidates(pol_name, "origin", country, allow_trim=True, trim_only=True)
-        dest_candidates = one_api_location_candidates(pod_name, "destination", country, allow_trim=True, trim_only=True)
+        origin_candidates = one_api_location_candidates(
+            pol_name, "origin", country, allow_trim=True, trim_only=True,
+            fail_on_api_error=True)
+        dest_candidates = one_api_location_candidates(
+            pod_name, "destination", country, allow_trim=True, trim_only=True,
+            fail_on_api_error=True)
         origin, dest, trips, trip_rows = probe_one_pair(origin_candidates, dest_candidates)
 
     if not origin or not dest or not trip_rows:
@@ -1969,9 +1981,8 @@ def scrape_tab(row_data):
                     "//div[@role='option' and @aria-disabled='false' and not(contains(@class,'outside-month')) and not(contains(@class,'disabled'))]",
                 ]
                 for bxp in broader_xpaths:
-                    broader_dates = driver.find_elements(By.XPATH, bxp)
-                    # Lọc chỉ những ngày có text chứa giá (K = nghìn)
-                    dates_with_price = [d for d in broader_dates if re.search(r'\d+\.?\d*K', d.text or "")]
+                    # React may replace calendar cells while their text is read.
+                    dates_with_price = one_calendar_price_dates(driver, bxp)
                     if dates_with_price:
                         print(f"  🔍 Tìm thêm {len(dates_with_price)} ngày có giá (broader search)")
                         highlight_dates = dates_with_price
@@ -1985,10 +1996,8 @@ def scrape_tab(row_data):
                 time.sleep(2)
                 highlight_dates = driver.find_elements(By.XPATH, HIGHLIGHT_XPATH)
                 if len(highlight_dates) <= 1:
-                    all_enabled = driver.find_elements(By.XPATH,
-                        "//div[@role='option' and @aria-disabled='false' and not(contains(@class,'outside-month')) and not(contains(@class,'disabled'))]"
-                    )
-                    dates_with_price = [d for d in all_enabled if re.search(r'\d+\.?\d*K', d.text or "")]
+                    dates_with_price = one_calendar_price_dates(driver,
+                        "//div[@role='option' and @aria-disabled='false' and not(contains(@class,'outside-month')) and not(contains(@class,'disabled'))]")
                     if dates_with_price:
                         highlight_dates = dates_with_price
                 print(f"  🔍 Lần đọc lại: {len(highlight_dates)} ngày có giá")
@@ -2041,10 +2050,8 @@ def scrape_tab(row_data):
                 # Tìm lại với broader search
                 highlight_dates_2 = driver.find_elements(By.XPATH, HIGHLIGHT_XPATH)
                 if len(highlight_dates_2) <= 1:
-                    all_en = driver.find_elements(By.XPATH,
-                        "//div[@role='option' and @aria-disabled='false' and not(contains(@class,'outside-month')) and not(contains(@class,'disabled'))]"
-                    )
-                    dp = [d for d in all_en if re.search(r'\d+\.?\d*K', d.text or "")]
+                    dp = one_calendar_price_dates(driver,
+                        "//div[@role='option' and @aria-disabled='false' and not(contains(@class,'outside-month')) and not(contains(@class,'disabled'))]")
                     if dp:
                         highlight_dates_2 = dp
                         print(f"  🔍 Sau 3s: {len(highlight_dates_2)} ngày có giá (broader)")
@@ -2363,24 +2370,32 @@ def scrape_tab(row_data):
     for ul in charge_items:
         try:
             fee_name = ul.find_element(By.XPATH, "./preceding-sibling::div[1]//span[contains(@class, 'ChargeBreakdownItem_p-sub-title__')]").text.strip().lower()
-        except: continue
+        except:
+            try:
+                fee_name = ul.find_element(By.XPATH, "./preceding-sibling::div[1]").text.strip().lower()
+            except:
+                continue
+        try:
+            sib_text = ul.find_element(By.XPATH, "./preceding-sibling::div[1]").text.strip().lower()
+        except:
+            sib_text = fee_name
         group = one_selenium_charge_group(ul)
         if one_is_origin_thc_charge(fee_name): has_thc = True
         if "entry summary declaration surcharge" in fee_name: has_ens_ams = True
         if one_is_ows_charge(fee_name): has_ows = True
         if not one_should_include_charge(fee_name, group, include_origin_thc=china_route): continue
-        is_discount = "special promotion service" in fee_name
+        is_discount = one_is_discount_charge(fee_name) or one_is_discount_charge(sib_text)
         equipment_amount_found = False
         common_amounts = []
         for line in ul.find_elements(By.XPATH, "./li"):
             text_line = line.text.strip()
-            if " x 1" not in text_line: continue
+            if not text_line: continue
             m = re.search(r'(DRY 40H|DRY 40|DRY 20).*?\((USD|EUR|CHF|VND)\s*([0-9,.]+)\)', text_line, re.I)
             if m:
                 equipment_amount_found = True
                 currency = m.group(2).upper()
                 amount = float(m.group(3).replace(',','')) * get_live_exchange_rate(currency, "USD")
-                signed_amount = -amount if is_discount else amount
+                signed_amount = -abs(amount) if is_discount else amount
                 final_prices[m.group(1)] += signed_amount
                 formula_parts[m.group(1)].append(signed_amount)
                 continue
@@ -2390,7 +2405,8 @@ def scrape_tab(row_data):
             if common_match:
                 currency = common_match.group(1).upper()
                 amount = float(common_match.group(2).replace(',', '')) * get_live_exchange_rate(currency, "USD")
-                common_amounts.append(-amount if is_discount else amount)
+                signed_amount = -abs(amount) if is_discount else amount
+                common_amounts.append(signed_amount)
 
         if not equipment_amount_found:
             for signed_amount in common_amounts:
@@ -2746,6 +2762,7 @@ ONE_PORT_MAPPING = {
     "TIANJIN": "XINGANG",
     "FOS SUR MER": "FOS-SUR-MER",
     "VENICE": "VENEZIA",
+    "BUENEVENTURA": "BUENAVENTURA",
 }
 # Áp dụng mapping cho POD (row[3]) trong raw_data — giữ tên gốc trong Excel output
 for _rd in raw_data:
