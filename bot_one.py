@@ -23,7 +23,13 @@ from pathlib import Path
 import requests
 import warnings
 from selenium.webdriver.remote.remote_connection import RemoteConnection
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import (
+    parse_date_offset_days,
+    etd_within_max,
+    max_etd_date,
+    max_etd_date_only,
+    format_etd_dates_excel,
+)
 from remark_rules import apply_manifest_rule, get_manifest_code, is_china_destination
 
 DATE_OFFSET_DAYS = parse_date_offset_days()
@@ -1601,13 +1607,7 @@ def one_api_format_result(row_data, candidates):
     if not final_sels:
         return {"POL": row_data[2], "POD": row_data[3], "Status": "No Valid ETD"}
 
-    etd_strs = [f"{c['etd'].day}-{c['etd'].strftime('%b')}" for c in final_sels]
-    if len(etd_strs) == 1:
-        etd_excel = etd_strs[0]
-    elif len(etd_strs) == 2:
-        etd_excel = f"{etd_strs[0]} & {etd_strs[1]}"
-    else:
-        etd_excel = f"{', '.join(str(c['etd'].day) for c in final_sels[:-1])}, {final_sels[-1]['etd'].day}-{final_sels[0]['etd'].strftime('%b')}"
+    etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
     transits = [c["transit"] for c in final_sels]
     transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"
     valid_excel = get_valid_date([c["etd"] for c in final_sels])
