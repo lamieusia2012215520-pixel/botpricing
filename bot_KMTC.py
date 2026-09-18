@@ -23,7 +23,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
 import openpyxl
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from remark_rules import build_subject_remark, charge_amount_to_usd
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -541,6 +541,56 @@ def activate_tab(handle, label=""):
         pass
     if label:
         print(f"   🧭 Active tab: {label}")
+
+
+def _kmtc_window_handles():
+    """Read handles without invoking Selenium's potentially blocking new_window API."""
+    try:
+        return list(driver.window_handles)
+    except Exception:
+        return []
+
+
+def open_kmtc_tab_resilient(label=""):
+    """Open a tab through JS/CDP and return quickly if the renderer is unhealthy.
+
+    Selenium's ``switch_to.new_window('tab')`` occasionally blocks for the full
+    command timeout against an attached Edge session.  The browser itself can
+    create the tab immediately, so prefer window.open and CDP Target.createTarget.
+    """
+    before = set(_kmtc_window_handles())
+    if before:
+        try:
+            activate_tab(next(iter(before)))
+        except Exception:
+            pass
+
+    for method_name in ("javascript", "cdp"):
+        target_id = None
+        try:
+            if method_name == "javascript":
+                driver.execute_script("window.open('about:blank', '_blank');")
+            else:
+                target = driver.execute_cdp_cmd(
+                    "Target.createTarget", {"url": "about:blank"}
+                ) or {}
+                target_id = target.get("targetId")
+
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                handles = _kmtc_window_handles()
+                new_handles = [h for h in handles if h not in before]
+                if target_id and target_id in handles:
+                    new_handles = [target_id]
+                if new_handles:
+                    handle = new_handles[-1]
+                    activate_tab(handle, label)
+                    return handle
+                time.sleep(0.2)
+        except Exception as exc:
+            print(f"   [WARN] Mở tab KMTC bằng {method_name} lỗi: {type(exc).__name__}")
+
+    raise RuntimeError(f"Không tạo được tab KMTC mới ({label or 'không tên'})")
 
 def human_click(element):
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
@@ -1347,18 +1397,7 @@ def apply_etd_rules_kmtc(schedule_list):
             continue
         selected.append(s)
 
-    num = len(selected)
-    if num == 0:   str_etd = "N/A"
-    elif num == 1: str_etd = selected[0]["etd_str"]
-    elif num == 2: str_etd = f"{selected[0]['etd_str']} & {selected[1]['etd_str']}"
-    else:
-        if all(s["etd_dt"].month == selected[0]["etd_dt"].month for s in selected):
-            d1 = str(selected[0]["etd_dt"].day)
-            d2 = str(selected[1]["etd_dt"].day)
-            d3 = f"{selected[2]['etd_dt'].day}-{selected[2]['etd_dt'].strftime('%b')}"
-            str_etd = f"{d1}, {d2}, {d3}"
-        else:
-            str_etd = " & ".join(s["etd_str"] for s in selected)
+    str_etd = format_etd_dates_excel([s["etd_dt"] for s in selected]) or "N/A"
 
     all_tt = [s["tt_days"] for s in selected]
     str_tt = str(min(all_tt)) if min(all_tt) == max(all_tt) else f"{min(all_tt)}-{max(all_tt)}"
@@ -1758,8 +1797,11 @@ except Exception:
     handles = []
 
 if not handles:
-    driver.switch_to.new_window("tab")
-    handles = [driver.current_window_handle]
+    try:
+        first_handle = open_kmtc_tab_resilient("Freight")
+        handles = [first_handle]
+    except Exception as exc:
+        raise RuntimeError(f"KMTC không có tab khả dụng và không mở được tab Freight: {exc}")
 
 tab_freight = None
 tab_sched = None
@@ -1777,19 +1819,22 @@ for h in list(handles):
 if tab_freight is None:
     tab_freight = next((h for h in handles if h != tab_sched), None)
     if tab_freight is None:
-        driver.switch_to.new_window("tab")
-        tab_freight = driver.current_window_handle
+        tab_freight = open_kmtc_tab_resilient("Freight")
         handles.append(tab_freight)
 
 if tab_sched is None:
     tab_sched = next((h for h in handles if h != tab_freight), None)
     if tab_sched is None:
-        activate_tab(tab_freight, "KMTC base")
-        driver.switch_to.new_window("tab")
-        tab_sched = driver.current_window_handle
-        handles.append(tab_sched)
+        try:
+            tab_sched = open_kmtc_tab_resilient("Schedule")
+            handles.append(tab_sched)
+        except Exception as exc:
+            # Không để lỗi CDP làm crash cả worker. Giá vẫn được check; lịch
+            # chỉ bị bỏ qua nếu Edge không tạo được tab thứ hai.
+            tab_sched = None
+            print(f"   ⚠️ Không mở được tab Schedule KMTC: {type(exc).__name__}; bỏ qua phần lịch.")
 
-keep_handles = [tab_freight, tab_sched]
+keep_handles = [h for h in (tab_freight, tab_sched) if h]
 extra_handles = [h for h in handles if h not in keep_handles]
 if extra_handles:
     print(f"[HỆ THỐNG] Đóng {len(extra_handles)} tab KMTC dư để giảm RAM...")
@@ -1803,14 +1848,10 @@ if extra_handles:
             print(f"   ⚠️ Không đóng được tab dư: {type(e).__name__}")
             close_failed = True
     if close_failed:
-        restart_kmtc_edge()
-        handles = list(driver.window_handles)
-        while len(handles) < 2:
-            activate_tab(handles[0], "KMTC base")
-            driver.switch_to.new_window("tab")
-            handles.append(driver.current_window_handle)
-        keep_handles = handles[:2]
-        tab_freight, tab_sched = keep_handles
+        # A close() timeout only affects browser cleanup; the two selected
+        # Freight/Schedule tabs are still valid.  Restarting the attached Edge
+        # here used to race the debug port and crash the entire KMTC worker.
+        print("   ⚠️ Giữ tab dư và tiếp tục với 2 tab KMTC đã sẵn sàng (không restart Edge).")
 
 activate_tab(tab_freight, "Freight")
 driver.get(BASE_URL)
@@ -1821,13 +1862,24 @@ rand_sleep(0.8, 1.2)
 ensure_logged_in()
 open_freight_inquiry()
 
-activate_tab(tab_sched, "Schedule")
-driver.get(SCHED_URL)
-print(f"   🌐 Tab Schedule load KMTC...")
-WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-rand_sleep(0.3, 0.6)
+if tab_sched:
+    try:
+        activate_tab(tab_sched, "Schedule")
+        driver.get(SCHED_URL)
+        print(f"   🌐 Tab Schedule load KMTC...")
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        rand_sleep(0.3, 0.6)
+    except Exception as exc:
+        # Tab Schedule đã mở được lúc trước nhưng có thể bị đóng ngoài ý muốn
+        # (vd. KMTC tự đóng tab trùng phiên đăng nhập sau khi Freight login xong).
+        # Không để lỗi này làm crash cả worker và mất luôn 100% dữ liệu giá —
+        # cùng triết lý xử lý như nhánh "không mở được tab Schedule" ở trên.
+        print(f"   ⚠️ Tab Schedule KMTC không còn dùng được ({type(exc).__name__}); bỏ qua phần lịch.")
+        tab_sched = None
+else:
+    print("   ⚠️ KMTC chỉ có tab Freight; sẽ bỏ qua scrape lịch để không treo worker.")
 
-print(f"✅ 2 tabs sẵn sàng (Freight + Schedule)\n")
+print(f"✅ KMTC tabs sẵn sàng ({'2 tabs Freight + Schedule' if tab_sched else '1 tab Freight'})\n")
 activate_tab(tab_freight, "Freight")
 
 # ===================================================================================
@@ -1936,23 +1988,26 @@ for orig_row_i, pol_excel, pod_orig, country in initial_queue:
     if pol_excel == "HO CHI MINH" and pod_upper in CMP_PODS:
         pol_sched = "CMP"
 
-    print(f"\n   [Sched] 🗓️ Check lịch: {pol_sched} → {pod_search}")
-    try:
-        sched_list = do_schedule_search(pol_sched, pod_search, tab_sched, str(valid_to_cell))
-        if sched_list:
-            str_etd, str_tt, selected = apply_etd_rules_kmtc(sched_list)
-            print(f"   [Sched] 🏆 ETD: {str_etd} | T/T: {str_tt}")
-            ws.cell(row=actual_row_i, column=9).value  = str_etd
-            ws.cell(row=actual_row_i, column=10).value = str_tt
-            # Ghi vessel details + transshipment theo format CMA
-            if selected:
-                write_schedule_to_row(ws, actual_row_i, selected)
-            try: wb.save(excel_path)
-            except PermissionError: print("   ❌ Tắt Excel đi!")
-        else:
-            print(f"   [Sched] ⚠️ Không có lịch tàu")
-    except Exception as e:
-        print(f"   [Sched] ❌ Lỗi: {e}")
+    if tab_sched:
+        print(f"\n   [Sched] 🗓️ Check lịch: {pol_sched} → {pod_search}")
+        try:
+            sched_list = do_schedule_search(pol_sched, pod_search, tab_sched, str(valid_to_cell))
+            if sched_list:
+                str_etd, str_tt, selected = apply_etd_rules_kmtc(sched_list)
+                print(f"   [Sched] 🏆 ETD: {str_etd} | T/T: {str_tt}")
+                ws.cell(row=actual_row_i, column=9).value  = str_etd
+                ws.cell(row=actual_row_i, column=10).value = str_tt
+                # Ghi vessel details + transshipment theo format CMA
+                if selected:
+                    write_schedule_to_row(ws, actual_row_i, selected)
+                try: wb.save(excel_path)
+                except PermissionError: print("   ❌ Tắt Excel đi!")
+            else:
+                print(f"   [Sched] ⚠️ Không có lịch tàu")
+        except Exception as e:
+            print(f"   [Sched] ❌ Lỗi: {e}")
+    else:
+        print("   [Sched] ⚠️ Không có tab Schedule; đã bỏ qua scrape lịch.")
 
     # Switch về tab freight cho dòng tiếp theo
     activate_tab(tab_freight)

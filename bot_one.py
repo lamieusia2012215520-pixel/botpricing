@@ -2297,15 +2297,7 @@ def scrape_tab(row_data):
         return {"POL": row_data[2], "POD": row_data[3], "Status": "No Valid ETD"}
 
     # Format Excel
-    etd_strs = [f"{c['etd'].day}-{c['etd'].strftime('%b')}" for c in final_sels]
-    if len(etd_strs) == 1:
-        etd_excel = etd_strs[0]
-    elif len(etd_strs) == 2:
-        etd_excel = f"{etd_strs[0]} & {etd_strs[1]}"
-    else:
-        month = final_sels[0]["etd"].strftime("%b")
-        days  = [str(c["etd"].day) for c in final_sels]
-        etd_excel = f"{', '.join(days[:-1])}, {days[-1]}-{month}"
+    etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
 
     transits      = [c["transit"] for c in final_sels]
     transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"
@@ -2331,15 +2323,7 @@ def scrape_tab(row_data):
         return None
     
     # Format Excel
-    etd_strs = [f"{c['etd'].day}-{c['etd'].strftime('%b')}" for c in final_sels]
-    if len(etd_strs) == 1:
-        etd_excel = etd_strs[0]
-    elif len(etd_strs) == 2:
-        etd_excel = f"{etd_strs[0]} & {etd_strs[1]}"
-    else:
-        month = final_sels[0]["etd"].strftime("%b")
-        days  = [str(c["etd"].day) for c in final_sels]
-        etd_excel = f"{', '.join(days[:-1])}, {days[-1]}-{month}"
+    etd_excel = format_etd_dates_excel([c["etd"] for c in final_sels])
 
     transits      = [c["transit"] for c in final_sels]
     transit_excel = str(transits[0]) if len(set(transits)) == 1 else f"{transits[0]}-{transits[-1]}"

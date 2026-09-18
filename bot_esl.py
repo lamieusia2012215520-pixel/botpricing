@@ -26,7 +26,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 
-from bot_cli import etd_within_max, max_etd_date_only, parse_date_offset_days
+from bot_cli import etd_within_max, max_etd_date_only, parse_date_offset_days, format_etd_dates_excel
 
 
 try:
@@ -555,21 +555,7 @@ def fmt_date_short(dt):
 
 
 def format_etd_text(entries):
-    values = [(entry["etd_dt"].day, entry["etd_dt"].strftime("%b")) for entry in entries]
-    if not values:
-        return ""
-    if len(values) == 1:
-        return f"{values[0][0]}-{values[0][1]}"
-    if len(values) == 2:
-        return f"{values[0][0]}-{values[0][1]} & {values[1][0]}-{values[1][1]}"
-    months = [month for _, month in values]
-    if months[0] == months[1] == months[2]:
-        return f"{values[0][0]}, {values[1][0]}, {values[2][0]}-{values[2][1]}"
-    if months[0] == months[1]:
-        return f"{values[0][0]}, {values[1][0]}-{values[1][1]} & {values[2][0]}-{values[2][1]}"
-    if months[1] == months[2]:
-        return f"{values[0][0]}-{values[0][1]}, {values[1][0]} & {values[2][0]}-{values[2][1]}"
-    return " & ".join(f"{day}-{month}" for day, month in values)
+    return format_etd_dates_excel([entry["etd_dt"] for entry in entries])
 
 
 def format_transit_time(entries):

@@ -26,7 +26,7 @@ from selenium.webdriver.edge.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from remark_rules import apply_manifest_rule, get_manifest_code, is_china_destination, normalize_remark_text
 
 
@@ -52,7 +52,7 @@ HMM_URL = "https://www.hmm21.com/e-service/hiquote/quotationNew.do"
 HMM_LOGIN_URL = "https://www.hmm21.com/e-service/auth/login.do"
 HMM_BASE_URL = "https://www.hmm21.com"
 HMM_USER = os.environ.get("HMM_USER", "PIOLOG")
-HMM_PASS = os.environ.get("HMM_PASS", "hmm7980762")
+HMM_PASS = os.environ.get("HMM_PASS", "Xvnt@27768")
 HMM_NAV_RETRY = int(os.environ.get("HMM_NAV_RETRY", "4"))
 HMM_PAGELOAD_TIMEOUT = int(os.environ.get("HMM_PAGELOAD_TIMEOUT", "45"))
 HMM_SCRIPT_TIMEOUT = int(os.environ.get("HMM_SCRIPT_TIMEOUT", "25"))
@@ -82,6 +82,11 @@ PORT_CODES = {
     "HAIPHONG": "VNHPH",
     "HPH": "VNHPH",
     "VNHPH": "VNHPH",
+    "COLOMBO": "LKCMB",
+    "LKCMB": "LKCMB",
+    "CHITTAGONG": "BDCGP",
+    "CHITTA GONG": "BDCGP",
+    "BDCGP": "BDCGP",
     "MUNDRA": "INMUN",
     "INMUN": "INMUN",
     "NHAVA SHEVA": "INNSA",
@@ -286,6 +291,31 @@ def hmm_hi_quote_inactive(driver):
     return "hi quote service is not currently activated" in text
 
 
+def hmm_login_error(driver):
+    """Return a concrete HMM authentication error; never retry bad credentials."""
+    try:
+        messages = driver.execute_script("""
+            const values = [];
+            const hidden = document.getElementById('errMsg');
+            if (hidden && hidden.value) values.push(hidden.value);
+            document.querySelectorAll('.alert, .error, [class*="error"], [role="alert"]')
+                .forEach(el => {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    if (text) values.push(text);
+                });
+            return values.join('\\n');
+        """) or ""
+    except Exception:
+        messages = ""
+    normalized = " ".join(str(messages).split())
+    lower = normalized.lower()
+    if "wrong password" in lower or "cannot log in" in lower:
+        return normalized or "HMM rejected the password"
+    if any(token in lower for token in ("locked", "invalid password", "login failed")):
+        return normalized
+    return ""
+
+
 def hmm_safe_get(driver, url, attempts=None, wait_after=1.5):
     attempts = attempts or HMM_NAV_RETRY
     transient_tokens = (
@@ -333,10 +363,15 @@ def ensure_login(driver):
     log("Chua login HMM -> dang login...")
     for attempt in range(1, 3):
         hmm_safe_get(driver, HMM_LOGIN_URL)
-        WebDriverWait(driver, 25).until(lambda d: hmm_quote_ready(d) or d.find_elements(By.ID, "userId"))
+        WebDriverWait(driver, 25).until(
+            lambda d: hmm_quote_ready(d) or d.find_elements(By.ID, "userId")
+        )
         if hmm_quote_ready(driver):
             log("Login HMM xong.")
             return
+        existing_error = hmm_login_error(driver)
+        if existing_error:
+            raise RuntimeError(f"HMM LOGIN BLOCKED: {existing_error}")
 
         driver.execute_script(
             """
@@ -362,12 +397,22 @@ def ensure_login(driver):
         )
 
         try:
-            WebDriverWait(driver, 35).until(lambda d: hmm_quote_ready(d) or hmm_hi_quote_inactive(d))
+            WebDriverWait(driver, 35).until(
+                lambda d: (
+                    hmm_quote_ready(d)
+                    or hmm_hi_quote_inactive(d)
+                    or bool(hmm_login_error(d))
+                )
+            )
         except TimeoutException:
             if attempt < 2:
                 log("Login HMM chua thay form quote -> thu login lai...")
                 continue
             raise
+
+        login_error = hmm_login_error(driver)
+        if login_error:
+            raise RuntimeError(f"HMM LOGIN FAILED: {login_error}")
 
         if hmm_hi_quote_inactive(driver):
             raise RuntimeError(
@@ -1033,14 +1078,7 @@ def fmt_etd(selected):
     if not selected:
         return ""
     dates = [c["etd_date"] for c in selected]
-    chunks = [f"{d.day}-{d.strftime('%b')}" for d in dates]
-    if len(chunks) == 1:
-        return chunks[0]
-    if len(chunks) == 2:
-        return f"{chunks[0]} & {chunks[1]}"
-    if len({d.strftime('%b') for d in dates}) == 1:
-        return f"{dates[0].day}, {dates[1].day}, {dates[2].day}-{dates[0].strftime('%b')}"
-    return ", ".join(chunks)
+    return format_etd_dates_excel(dates)
 
 
 def fmt_tt(selected):

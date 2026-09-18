@@ -15,3 +15,10 @@ __pycache__/
 
 # Allow some specific non-code files if needed, but for now just python files
 !*.py
+.codex_tmp/
+scratch/
+log_main.txt
+progress_status.txt
+edge_profile/
+maersk_profile/
+errors/

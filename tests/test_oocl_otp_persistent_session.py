@@ -355,15 +355,12 @@ class OOCLOtpPersistentSessionTests(unittest.TestCase):
         )
 
     @patch("subprocess.run")
-    def test_main_cleanup_stops_oocl_driver_but_not_oocl_edge(self, run_mock):
+    def test_main_cleanup_never_kills_oocl_edge_or_driver(self, run_mock):
         run_mock.return_value.returncode = 0
 
         self.assertTrue(main_module.kill_specific_bot_edge("bot_oocl.py", bot_pid=321))
 
-        command = run_mock.call_args.args[0]
-        powershell = command[-1]
-        self.assertIn("msedgedriver.exe", powershell)
-        self.assertNotIn("name = 'msedge.exe'", powershell)
+        run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

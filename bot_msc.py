@@ -16,7 +16,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.common.exceptions import TimeoutException
 from datetime import datetime, timedelta
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from bot_runtime_utils import is_transient_webdriver_error, switch_to_live_window
 
 DATE_OFFSET_DAYS = parse_date_offset_days(default=4)
@@ -636,24 +636,7 @@ def parse_msc_date(date_str):
     except: return None
 
 def format_etd_display(dates_list):
-    if not dates_list: return ""
-    dates_list.sort()
-    
-    def _fmt(d):
-        return f"{d.day}-{d.strftime('%b')}"
-    
-    if len(dates_list) == 1: 
-        return _fmt(dates_list[0])
-        
-    if len(dates_list) == 2:
-        return f"{_fmt(dates_list[0])} & {_fmt(dates_list[1])}"
-        
-    months = set([d.month for d in dates_list])
-    if len(months) == 1:
-        days = [str(d.day) for d in dates_list]
-        return f"{', '.join(days[:-1])}, {days[-1]}-{dates_list[-1].strftime('%b')}"
-    else:
-        return ", ".join([_fmt(d) for d in dates_list])
+    return format_etd_dates_excel(dates_list)
 
 def get_validity_from_row(driver, row_idx):
     """Lấy ngày kết thúc Shipping Window từ chính dòng (Row) đó"""
@@ -820,7 +803,9 @@ def process_schedule_logic(driver, ts_ports_str="DIRECT"):
     selected_vessels = [v for v in deduped if v['dt'] >= min_etd]
 
     if not selected_vessels:
-        fallback_candidates = [v for v in deduped if today <= v['dt'] < min_etd]
+        # ETD = hôm nay không phải là quote hữu ích (tàu chạy ngay hôm nay) nên loại
+        # khỏi fallback; nếu đó là ứng viên duy nhất thì coi như không có lịch.
+        fallback_candidates = [v for v in deduped if today < v['dt'] < min_etd]
         if not fallback_candidates:
             return None
         selected_vessels = [max(fallback_candidates, key=lambda x: x['dt'])]

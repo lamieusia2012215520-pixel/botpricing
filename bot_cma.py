@@ -16,7 +16,7 @@ import socket
 import sys
 import io
 import calendar
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from cma_logic import (
     classify_cma_card_texts,
     cma_date_input_matches,
@@ -65,15 +65,15 @@ except ValueError:
 try:
     CMA_MODIFY_BUTTON_WAIT_SECONDS = max(
         2.0,
-        float(os.environ.get("CMA_MODIFY_BUTTON_WAIT_SECONDS", "5")),
+        float(os.environ.get("CMA_MODIFY_BUTTON_WAIT_SECONDS", "15")),
     )
     CMA_MODIFY_FORM_WAIT_SECONDS = max(
         3.0,
-        float(os.environ.get("CMA_MODIFY_FORM_WAIT_SECONDS", "8")),
+        float(os.environ.get("CMA_MODIFY_FORM_WAIT_SECONDS", "20")),
     )
 except ValueError:
-    CMA_MODIFY_BUTTON_WAIT_SECONDS = 5.0
-    CMA_MODIFY_FORM_WAIT_SECONDS = 8.0
+    CMA_MODIFY_BUTTON_WAIT_SECONDS = 15.0
+    CMA_MODIFY_FORM_WAIT_SECONDS = 20.0
 try:
     CMA_ROW_SLEEP_MIN = max(0.0, float(os.environ.get("CMA_ROW_SLEEP_MIN", "0.8")))
     CMA_ROW_SLEEP_MAX = max(CMA_ROW_SLEEP_MIN, float(os.environ.get("CMA_ROW_SLEEP_MAX", "1.2")))
@@ -104,7 +104,9 @@ def _excel_formula_from_parts(parts):
 
 EDGE_EXE           = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 EDGE_DEBUG_PORT    = 9524
-EDGE_USER_DATA_DIR = r"C:\edge_cma"  # ← profile riêng cho CMA
+# The former profile is blocked by CMA/DataDome.  This dedicated profile was
+# verified on 14-Sep-2026 with a completed ANL quote; keep it stable between runs.
+EDGE_USER_DATA_DIR = os.environ.get("CMA_EDGE_USER_DATA_DIR", r"C:\edge_cma_test_20260914")
 CMA_URL            = "https://www.cma-cgm.com/ebusiness/pricing/instant-quoting"
 LOGIN_URL          = "https://www.cma-cgm.com/myCmaCgm/login"
 LOGIN_EMAIL        = os.environ.get("CMA_EMAIL", "celine@pio-logistics.vn")
@@ -342,10 +344,54 @@ def _cma_get_quote_port_inputs(drv, visible_only=True):
     return visible
 
 
+def _cma_datadome_blocked(drv):
+    """Detect the vendor's explicit blocked page; never retry it as a slow form."""
+    try:
+        return bool(drv.find_elements(
+            By.CSS_SELECTOR,
+            "iframe[src*='captcha-delivery.com/captcha/'], iframe[title*='DataDome']",
+        ))
+    except Exception:
+        return False
+
+
+class CMAWebsiteBlocked(RuntimeError):
+    pass
+
+
+def _cma_require_unblocked(drv):
+    if _cma_datadome_blocked(drv):
+        raise CMAWebsiteBlocked(
+            "CMA/DataDome chặn trình duyệt; dừng CMA, không ghi giá/no-offer giả"
+        )
+
+
+def _cma_quote_page_problem(drv):
+    """Explain an unavailable page without confusing it with bad credentials."""
+    if _cma_datadome_blocked(drv):
+        return "CMA/DataDome chặn trình duyệt; cần xử lý với CMA, bot không thể lấy giá"
+    try:
+        title = (drv.title or "").strip()
+        body = (drv.find_element(By.TAG_NAME, "body").text or "")[:1000]
+        text = f"{title} {body}".lower()
+        if any(term in text for term in (
+            "access denied", "403 forbidden", "request blocked",
+            "temporarily unavailable", "service unavailable",
+        )):
+            return "CMA từ chối/không phục vụ trang Spot-On"
+        if _cma_manual_challenge_present(drv):
+            return "CMA yêu cầu CAPTCHA/xác minh"
+    except Exception:
+        pass
+    return "form Spot-On chưa render"
+
+
 def _cma_wait_quote_form(drv, timeout=30):
     """Wait for both POL and POD inputs, not merely a pricing-looking URL."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if _cma_datadome_blocked(drv):
+            return []
         if _cma_is_login_url(_cma_current_url(drv)):
             return []
         inputs = _cma_get_quote_port_inputs(drv, visible_only=True)
@@ -360,6 +406,8 @@ def _wait_cma_spoton_after_login(drv, timeout=None):
     end = time.time() + timeout
     last_log = time.time()
     while time.time() < end:
+        if _cma_datadome_blocked(drv):
+            return False
         cur_url = _cma_current_url(drv)
         if _cma_is_spoton_url(cur_url):
             inputs = _cma_get_quote_port_inputs(drv, visible_only=True)
@@ -443,6 +491,9 @@ def check_and_login(drv):
             # Chờ web trả về lại trang báo giá
             print("[INFO] Đang chờ web quay lại trang Spot-On...")
             if not _wait_cma_spoton_after_login(drv, timeout=CMA_LOGIN_WAIT_SECONDS):
+                if _cma_datadome_blocked(drv):
+                    print(f"[ERROR] {_cma_quote_page_problem(drv)}")
+                    return False
                 print("[WARN] Web không tự chuyển về Spot-On (hoặc bị lag). Tiến hành ép chuyển hướng...")
                 drv.get(CMA_URL)
                 cur_url = _wait_cma_landing(drv, timeout=15)
@@ -456,6 +507,9 @@ def check_and_login(drv):
 
         except Exception as e:
             print(f"[ERROR] Quá trình nhập liệu login thất bại: {e}")
+            if _cma_datadome_blocked(drv):
+                print(f"[ERROR] {_cma_quote_page_problem(drv)}")
+                return False
             print("[INFO] Thử ép chuyển hướng lại trang Spot-On lần cuối...")
             try:
                 drv.get(CMA_URL)
@@ -468,6 +522,9 @@ def check_and_login(drv):
         if _cma_wait_quote_form(drv, timeout=30):
             print("[OK] Đã ở trang Spot-On và form quote sẵn sàng, không cần đăng nhập.")
             return True
+        if _cma_datadome_blocked(drv):
+            print(f"[ERROR] {_cma_quote_page_problem(drv)}")
+            return False
         print("[WARN] URL Spot-On đúng nhưng form quote chưa render; nạp lại trang quote một lần...")
         try:
             drv.get(CMA_URL)
@@ -479,11 +536,11 @@ def check_and_login(drv):
         if _cma_wait_quote_form(drv, timeout=30):
             print("[OK] Form Spot-On đã sẵn sàng sau khi nạp lại.")
             return True
-        print(f"[ERROR] Vẫn không thấy form quote. URL={_cma_current_url(drv)}")
+        print(f"[ERROR] {_cma_quote_page_problem(drv)}. URL={_cma_current_url(drv)}")
         return False
     else:
         print(f"[WARN] URL hiện tại không xác định: {cur_url}")
-        return True
+        return False
 
 def ensure_on_cma_tab(drv):
     print("[DEBUG] BẮT ĐẦU KHÓA MỤC TIÊU VÀO TAB CMA (BỎ QUA TAB RÁC)...")
@@ -538,6 +595,14 @@ if not driver:
     print("[ERROR] Không kết nối được Selenium. Dừng.")
     exit()
 
+if os.environ.get("CMA_CLEAR_CACHE_ON_START") == "1":
+    try:
+        driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+        print("[INFO] Đã xóa network cache của Edge CMA; giữ nguyên cookies/mật khẩu.")
+    except Exception as e:
+        print(f"[ERROR] Không xóa được cache CMA: {e}")
+        raise
+
 # Bùa tàng hình
 try:
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -549,7 +614,7 @@ except:
 ensure_on_cma_tab(driver)
 
 if not check_and_login(driver):
-    print("[ERROR] Đăng nhập thất bại. Dừng.")
+    print("[ERROR] Không vào được form Spot-On (xem nguyên nhân ở dòng trên). Dừng.")
     sys.exit(1)
 
 
@@ -598,6 +663,7 @@ def check_and_kill_popup():
 def ensure_cma_quote_form_inputs(context="", force_navigate=False):
     """Return the two visible POL/POD inputs, recovering the quote page once."""
     label = f" ({context})" if context else ""
+    _cma_require_unblocked(driver)
 
     def navigate_to_quote():
         print(f"   -> Nạp trang quote CMA{label}...")
@@ -617,8 +683,10 @@ def ensure_cma_quote_form_inputs(context="", force_navigate=False):
             navigate_to_quote()
 
     for attempt in range(2):
+        _cma_require_unblocked(driver)
         check_and_kill_popup()
         inputs = _cma_wait_quote_form(driver, timeout=20 if attempt == 0 else 30)
+        _cma_require_unblocked(driver)
         if len(inputs) >= 2:
             if attempt:
                 print(f"   [OK] Form quote CMA đã phục hồi{label}.")
@@ -646,44 +714,84 @@ def ensure_cma_quote_form_inputs(context="", force_navigate=False):
 def perform_modify_search_action():
     print("   -> Bấm Modify Search...")
     started = time.monotonic()
-    try:
-        clicked = WebDriverWait(
-            driver,
-            CMA_MODIFY_BUTTON_WAIT_SECONDS,
-            poll_frequency=0.2,
-        ).until(
-            lambda d: d.execute_script("""
-                const visible = el => {
-                    if (!el) return false;
-                    const s = getComputedStyle(el);
-                    const r = el.getBoundingClientRect();
-                    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-                };
-                const nodes = Array.from(document.querySelectorAll('button, a'));
-                const target = nodes.find(el =>
-                    visible(el) && /modify\\s*search/i.test((el.innerText || el.textContent || '').trim())
-                );
-                if (!target) return false;
-                target.click();
-                return true;
-            """)
-        )
-        if not clicked:
+    click_script = """
+        const visible = el => {
+            if (!el) return false;
+            const s = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+                   s.display !== 'none' && s.visibility !== 'hidden' &&
+                   r.width > 0 && r.height > 0;
+        };
+        const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+        const target = nodes.find(el =>
+            visible(el) && /modify\\s*search/i.test((el.innerText || el.textContent || '').trim())
+        );
+        if (!target) return false;
+        target.scrollIntoView({block: 'center'});
+        target.click();
+        return true;
+    """
+
+    def quote_form_ready(d):
+        try:
+            # NOTE: sau khi bấm "Modify Search", 2 input POL/POD của CMA luôn render
+            # kích thước 0x0 (getBoundingClientRect width=height=0) cho tới khi người
+            # dùng/script bấm vào ".selected-value-wrapper" để "mở" ô nhập — đây là
+            # hành vi UI có chủ đích (xem smart_update_field), không phải form chưa
+            # load xong. Dùng visible_only=True ở đây khiến điều kiện không bao giờ
+            # đúng và luôn timeout đủ CMA_MODIFY_FORM_WAIT_SECONDS (~20s/dòng, xác
+            # nhận qua debug snapshot ngày 2026-09-14). Full Mode đã dùng
+            # visible_only=False cho đúng 2 input này (xem ensure_cma_quote_form_inputs
+            # call site) nên đổi theo cho nhất quán: chỉ cần input tồn tại trong DOM,
+            # tín hiệu "form thật sự sẵn sàng" nằm ở nút Get My Quote bên dưới.
+            inputs = _cma_get_quote_port_inputs(d, visible_only=False)
+            if len(inputs) < 2:
+                return False
+            buttons = d.find_elements(
+                By.XPATH, "//button[contains(., 'Get My Quote') or @id='SearchQuote']"
+            )
+            return any(button.is_displayed() and button.is_enabled() for button in buttons)
+        except Exception:
             return False
 
-        WebDriverWait(driver, CMA_MODIFY_FORM_WAIT_SECONDS, poll_frequency=0.2).until(
-            EC.visibility_of_element_located(
-                (By.XPATH, "//button[contains(., 'Get My Quote') or @id='SearchQuote']"))
-        )
-        check_and_kill_popup()
-        print(f"      -> Modify form sẵn sàng sau {time.monotonic() - started:.1f}s")
-        return True
-    except Exception as exc:
-        print(
-            f"      [WARN] Modify Search chưa sẵn sàng sau "
-            f"{time.monotonic() - started:.1f}s ({type(exc).__name__})"
-        )
-        return False
+    last_error = None
+    for attempt in range(1, 3):
+        try:
+            check_and_kill_popup()
+            clicked = WebDriverWait(
+                driver,
+                CMA_MODIFY_BUTTON_WAIT_SECONDS,
+                poll_frequency=0.2,
+            ).until(lambda d: d.execute_script(click_script))
+            if not clicked:
+                raise TimeoutException("Modify Search chưa xuất hiện")
+
+            try:
+                WebDriverWait(
+                    driver,
+                    CMA_MODIFY_FORM_WAIT_SECONDS,
+                    poll_frequency=0.2,
+                ).until(quote_form_ready)
+            except Exception as exc:
+                # Đã click được Modify thì không click lần hai lên trang kết
+                # quả; chỉ kết luận sau đủ thời gian cho form React render.
+                last_error = exc
+                break
+            check_and_kill_popup()
+            print(f"      -> Modify form sẵn sàng sau {time.monotonic() - started:.1f}s")
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                print(f"      [WARN] Modify lần {attempt} chưa sẵn sàng; chờ và thử lại...")
+                time.sleep(1.0)
+
+    print(
+        f"      [WARN] Modify Search chưa sẵn sàng sau "
+        f"{time.monotonic() - started:.1f}s ({type(last_error).__name__ if last_error else 'unknown'})"
+    )
+    return False
     
 
 
@@ -712,8 +820,20 @@ def is_cma_no_offer_page():
 
 def wait_cma_result_state(timeout=15):
     """Return CARDS, NO_OFFER, NO_ROUTE, or TIMEOUT after Get Quote."""
+    started = time.time()
     deadline = time.time() + timeout
     while time.time() < deadline:
+        _cma_require_unblocked(driver)
+        # React can leave the previous route's error banner visible briefly.
+        # Read current cards first and give the new search a short grace period.
+        try:
+            if driver.find_elements(By.CSS_SELECTOR, "article.card-route-horizontal"):
+                return "CARDS"
+        except Exception:
+            pass
+        if time.time() - started < 1.5:
+            time.sleep(0.25)
+            continue
         if is_cma_no_offer_page():
             return "NO_OFFER"
 
@@ -722,12 +842,6 @@ def wait_cma_result_state(timeout=15):
             for alert in alerts:
                 if alert.is_displayed() and "SpotOn hasn't found possible route" in alert.text:
                     return "NO_ROUTE"
-        except:
-            pass
-
-        try:
-            if driver.find_elements(By.CSS_SELECTOR, "article.card-route-horizontal"):
-                return "CARDS"
         except:
             pass
 
@@ -761,6 +875,7 @@ def wait_for_cma_price_snapshot(timeout=None):
     last_state = "EMPTY"
 
     while time.monotonic() < deadline:
+        _cma_require_unblocked(driver)
         texts = get_cma_card_text_snapshot()
         state = classify_cma_card_texts(texts)
         last_state = state
@@ -810,6 +925,7 @@ def collect_cma_card_summaries():
 
 
 def mark_cma_no_offer(row_index, ws, value="No Offer"):
+    _cma_require_unblocked(driver)
     ws.cell(row=row_index, column=6).value = value
     try:
         wb.save(excel_path)
@@ -819,6 +935,7 @@ def mark_cma_no_offer(row_index, ws, value="No Offer"):
 
 def mark_cma_form_error(row_index, ws):
     """Do not leave stale price/schedule cells when the quote form is invalid."""
+    _cma_require_unblocked(driver)
     ws.cell(row=row_index, column=6).value = "Error"
     for column in (7, 8, 9, 10, 11, 13, 14, 15, 16):
         ws.cell(row=row_index, column=column).value = "-"
@@ -1096,6 +1213,12 @@ def debug_vessel_html():
 def get_cma_commodity_value():
     try:
         return (driver.execute_script("""
+            const visible = el => {
+                if (!el) return false;
+                const s = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
             var inputs = document.querySelectorAll('input');
             for (var i = 0; i < inputs.length; i++) {
                 var ph = (inputs[i].placeholder || '').toLowerCase();
@@ -1108,6 +1231,12 @@ def get_cma_commodity_value():
                     if (/freight all kinds/i.test(text)) return 'Freight All Kinds';
                 }
             }
+            var roots = document.querySelectorAll('#DdlCommodity, .commodity, [class*="commodity"]');
+            for (var j = 0; j < roots.length; j++) {
+                if (visible(roots[j]) && /freight all kinds/i.test(roots[j].innerText || '')) {
+                    return 'Freight All Kinds';
+                }
+            }
             return '';
         """) or "").strip()
     except Exception:
@@ -1115,6 +1244,10 @@ def get_cma_commodity_value():
 
 
 def select_commodity_refresh(max_attempts=3, control_wait_seconds=12):
+    current_value = get_cma_commodity_value()
+    if current_value and "FREIGHT ALL KINDS" in current_value.upper():
+        print(f"   -> Commodity đã sẵn sàng: {current_value}; không click lại.")
+        return True
     print("   -> Chọn lại Commodity...")
     selectors = [
         (By.ID, "DdlCommodity"),
@@ -1169,20 +1302,36 @@ def select_commodity_refresh(max_attempts=3, control_wait_seconds=12):
                     pass
 
             deadline = time.time() + 5
-            visible = []
+            option_state = {"found": False, "names": []}
             while time.time() < deadline:
                 try:
-                    visible = [
-                        item for item in driver.find_elements(By.CSS_SELECTOR, option_selector)
-                        if item.is_displayed() and (item.text or "").strip()
-                    ]
+                    # One DOM round-trip instead of is_displayed/text calls for
+                    # every option (the CMA dropdown may contain many entries).
+                    option_state = driver.execute_script("""
+                        const visible = el => {
+                            const s = getComputedStyle(el);
+                            return s.display !== 'none' && s.visibility !== 'hidden'
+                                && el.getClientRects().length > 0;
+                        };
+                        const options = Array.from(document.querySelectorAll(arguments[0]))
+                            .filter(visible);
+                        const selected = options.find(el =>
+                            /freight all kinds/i.test((el.innerText || el.textContent || '').trim()));
+                        if (selected) {
+                            const text = (selected.innerText || selected.textContent || '').trim();
+                            selected.click();
+                            return {found: true, text, names: []};
+                        }
+                        return {found: false, names: options.slice(0, 5)
+                            .map(el => (el.innerText || el.textContent || '').trim())};
+                    """, option_selector) or {"found": False, "names": []}
                 except Exception:
-                    visible = []
-                if visible:
+                    option_state = {"found": False, "names": []}
+                if option_state.get("found") or option_state.get("names"):
                     break
                 time.sleep(0.2)
 
-            if not visible:
+            if not option_state.get("found") and not option_state.get("names"):
                 print(f"      ⚠️ Dropdown chưa hiện options (lần {attempt}/{max_attempts})")
                 try:
                     driver.execute_script("arguments[0].click();", comm)
@@ -1190,18 +1339,12 @@ def select_commodity_refresh(max_attempts=3, control_wait_seconds=12):
                     pass
                 continue
 
-            chosen = next(
-                (item for item in visible if "FREIGHT ALL KINDS" in item.text.upper()),
-                None,
-            )
-            if chosen is None:
-                option_names = [(item.text or "").strip() for item in visible[:5]]
-                print(f"      ⚠️ Dropdown có options nhưng không có Freight All Kinds: {option_names}")
+            if not option_state.get("found"):
+                print(f"      ⚠️ Dropdown có options nhưng không có Freight All Kinds: {option_state.get('names')}")
                 continue
-            chosen_text = (chosen.text or "").strip()
-            driver.execute_script("arguments[0].click();", chosen)
+            chosen_text = option_state.get("text") or "Freight All Kinds"
 
-            deadline = time.time() + 3
+            deadline = time.time() + 8
             while time.time() < deadline:
                 value = get_cma_commodity_value()
                 if value:
@@ -1511,6 +1654,7 @@ def calculate_cma_validity(last_etd):
     return f"{last_day}-{last_etd.strftime('%b')}"
 
 def scrape_multi_etd_and_save(row_index, ws, pol_text_excel, price_mode="20_40HC"):
+    _cma_require_unblocked(driver)
     print("8. Đang quét danh sách tàu và bóc tách dữ liệu chi tiết...")
     pod_for_rule = str(ws.cell(row=row_index, column=4).value or "").strip()
     country_for_rule = str(ws.cell(row=row_index, column=2).value or "").strip()
@@ -2289,6 +2433,7 @@ def scrape_multi_etd_and_save(row_index, ws, pol_text_excel, price_mode="20_40HC
         # ══════════════════════════════════════════════════════════════════════════════
 
         # Cột F/G/H: Giá 20GP / 40GP / 40HQ
+        _cma_require_unblocked(driver)
         ws.cell(row=row_index, column=6).value = formula_20 if total_20 else "Check"
         if price_mode == "20_ONLY":
             ws.cell(row=row_index, column=7).value = "-"
@@ -2300,22 +2445,8 @@ def scrape_multi_etd_and_save(row_index, ws, pol_text_excel, price_mode="20_40HC
             ws.cell(row=row_index, column=8).value = forty_value
 
         # Cột I: ETD
-        def fmt_date(d):
-            return f"{d.day}-{d.strftime('%b')}"
-
         final_dates = [o['date'] for o in valid_opts]
-        if len(final_dates) == 1:
-            final_etd_str = fmt_date(final_dates[0])
-        elif len(final_dates) == 2:
-            final_etd_str = f"{fmt_date(final_dates[0])} & {fmt_date(final_dates[1])}"
-        elif len(final_dates) >= 3:
-            if all(d.month == final_dates[0].month for d in final_dates):
-                final_etd_str = (f"{final_dates[0].day}, {final_dates[1].day},"
-                                 f" {fmt_date(final_dates[2])}")
-            else:
-                final_etd_str = " & ".join(fmt_date(d) for d in final_dates)
-        else:
-            final_etd_str = "N/A"
+        final_etd_str = format_etd_dates_excel(final_dates) or "N/A"
         ws.cell(row=row_index, column=9).value = final_etd_str
 
         # Cột J: Transit
@@ -2369,6 +2500,8 @@ def scrape_multi_etd_and_save(row_index, ws, pol_text_excel, price_mode="20_40HC
         print(f"   [INFO] Đã trích xuất giá dòng {row_index} xong!")
         return "SUCCESS"
 
+    except CMAWebsiteBlocked:
+        raise
     except Exception as e:
         print(f"      ❌ Lỗi Scrape chi tiết tổng quát: {e}")
         ws.cell(row=row_index, column=6).value = "Error"
@@ -2402,28 +2535,18 @@ def write_row_data(ws, r_idx, data):
 
 def execute_single_search(row_index, pol_val, pod, is_riyadh, is_intra_hcm, pol_excel):
     global is_first_run_in_session, previous_pol
+    _cma_require_unblocked(driver)
     wait = WebDriverWait(driver, 15)
 
     def do_search_steps(allow_full_route_recovery=True, price_mode="20_40HC"):
+        _cma_require_unblocked(driver)
         if is_riyadh: handle_pod_selection_popup(prefer_port="JEDDAH")
         # Fix: RAMP luôn cần Vũng Tàu, không phân biệt Intra hay không
         if "RAMP" in pol_val or (not is_intra_hcm and "VNSGN" in pol_val):
             select_vung_tau_mandatory()
 
-        # === CHECK BANNER NO ROUTE ===
-        time.sleep(0.5) # Nghỉ nửa nhịp cho web render banner
-        try:
-            alerts = driver.find_elements(By.CSS_SELECTOR, "span.el-alert__title")
-            for alert in alerts:
-                if alert.is_displayed() and "SpotOn hasn't found possible route" in alert.text:
-                    print("      ⚠️ Phát hiện banner: No Route. Bỏ qua luôn!")
-                    ws.cell(row=row_index, column=6).value = "No Route"
-                    try: wb.save(excel_path)
-                    except: pass
-                    return "NO_ROUTE"
-        except:
-            pass
-        # =============================
+        # A banner left by the prior attempt is not evidence for this route.
+        # Only classify NO_ROUTE after Get My Quote has been submitted below.
 
         pick_date_plus_7()
         if is_first_run_in_session:
@@ -2520,6 +2643,8 @@ def execute_single_search(row_index, pol_val, pod, is_riyadh, is_intra_hcm, pol_
                     select_port_full(inputs[-1], pod)
                     return do_search_steps(allow_full_route_recovery=False, price_mode=price_mode)
                 except Exception as exc:
+                    if isinstance(exc, CMAWebsiteBlocked):
+                        raise
                     print(f"   ❌ Full recovery route thất bại: {type(exc).__name__}: {exc}")
                     return False
 
@@ -2586,9 +2711,26 @@ def execute_single_search(row_index, pol_val, pod, is_riyadh, is_intra_hcm, pol_
         select_port_full(inputs[-1], pod)
         
         status = do_search_steps()
+        if status == "FORM_ERROR":
+            # The first row can lose its Commodity control while CMA rerenders
+            # after the port pair changes. Retry this row on a fresh form once;
+            # never advance to Modify Mode from an invalid form.
+            print(f"   [RETRY] Dòng {row_index}: form/Commodity chưa sẵn sàng, nạp lại form một lần...")
+            inputs = ensure_cma_quote_form_inputs(
+                context=f"commodity retry row {row_index}", force_navigate=True,
+            )
+            if len(inputs) >= 2:
+                select_port_full(inputs[0], pol_val)
+                sleep_human(0.5, 0.8)
+                inputs = _cma_get_quote_port_inputs(driver, visible_only=False)
+                if len(inputs) >= 2:
+                    select_port_full(inputs[-1], pod)
+                    status = do_search_steps(allow_full_route_recovery=False)
+        if status in {"FORM_ERROR", "NO_ROUTE", False, None}:
+            # The next row must start from a clean quote form, not Modify.
+            return False
         is_first_run_in_session = False
         previous_pol = pol_val
-        if status == "NO_ROUTE": return False
     else:
         print(">> MODIFY MODE...")
         if perform_modify_search_action():

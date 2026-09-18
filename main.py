@@ -90,6 +90,7 @@ OOCL_PARALLEL_WORKERS = max(1, int(os.environ.get("OOCL_PARALLEL_WORKERS", "1") 
 BOT_PROGRESS = {}
 BOT_PROGRESS_LOCK = threading.Lock()
 BOT_CHILD_PIDS = set()
+OOCL_CHILD_PIDS = set()
 BOT_EDGE_CLEANUP_LOCK = threading.Lock()
 BOT_EDGE_CLEANUP_EVENTS = {}
 LAST_PROGRESS_PRINT = 0.0
@@ -219,10 +220,12 @@ def cleanup_bot_edges_after_main():
     if os.name != "nt":
         return
     bot_parent_pids = "@(" + ",".join(str(pid) for pid in sorted(BOT_CHILD_PIDS)) + ")"
+    oocl_parent_pids = "@(" + ",".join(str(pid) for pid in sorted(OOCL_CHILD_PIDS)) + ")"
     ps = f"""
 $killPatterns = {_ps_array(EDGE_CLEANUP_PATTERNS)}
 $keepPatterns = {_ps_array(EDGE_KEEP_PATTERNS)}
 $botParentPids = {bot_parent_pids}
+$ooclParentPids = {oocl_parent_pids}
 $killed = 0
 $procs = Get-CimInstance Win32_Process -Filter "name = 'msedge.exe'"
 foreach ($p in $procs) {{
@@ -251,7 +254,8 @@ foreach ($p in $procs) {{
 }}
 $drivers = Get-CimInstance Win32_Process -Filter "name = 'msedgedriver.exe'"
 foreach ($p in $drivers) {{
-    if ($botParentPids -contains [int]$p.ParentProcessId) {{
+    if (($botParentPids -contains [int]$p.ParentProcessId) -and
+        -not ($ooclParentPIds -contains [int]$p.ParentProcessId)) {{
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
         $killed++
     }}
@@ -441,6 +445,7 @@ FIRST_ROUND_BOTS = {
     "bot_HPL.py",
     "bot_one.py",
     "bot_oocl.py",
+    "bot_whl.py",
 }
 MAIN_ROUTE_CARRIERS = [
     "CMA", "COSCO", "CUL", "EMC", "ESL", "HAPAG LLOYD", "HMM",
@@ -1138,6 +1143,8 @@ def run_bot(bot_file, excel_override=None, extra_env=None):
         errors="replace",
     )
     BOT_CHILD_PIDS.add(proc.pid)
+    if os.path.basename(str(bot_file)).lower() == "bot_oocl.py":
+        OOCL_CHILD_PIDS.add(proc.pid)
     cleanup_key = bot_file
     if str(bot_file).lower() == "bot_oocl.py" and extra_env and "OOCL_WORKER_INDEX" in extra_env:
         try:
@@ -1175,6 +1182,10 @@ def kill_specific_bot_edge(bot_file, bot_pid=None):
     raw_bot_file = str(bot_file)
     parts = raw_bot_file.split("#", 1)
     base_bot_file = os.path.basename(parts[0]).lower()
+    # OOCL's OTP/login session is persistent. Never kill its Edge or driver;
+    # recovery must reconnect to the already-open browser only.
+    if base_bot_file == "bot_oocl.py":
+        return True
     suffix = parts[1].upper() if len(parts) > 1 else ""
     keep_edge = should_keep_bot_edge(raw_bot_file)
     pattern = BOT_EDGE_PATTERNS.get(base_bot_file)
@@ -1271,9 +1282,12 @@ def stream_output(name, proc, bot_file=None):
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        print(f"[{ts()}] [{name}] ⚠️ Process không exit sau 10s — force kill")
-        proc.kill()
-        proc.wait()
+        if os.path.basename(str(bot_file or "")).lower() == "bot_oocl.py":
+            print(f"[{ts()}] [{name}] ⚠️ Process chưa exit; giữ nguyên OOCL, không force kill.")
+        else:
+            print(f"[{ts()}] [{name}] ⚠️ Process không exit sau 10s — force kill")
+            proc.kill()
+            proc.wait()
     rc = proc.returncode
     status = "✅ OK" if rc == 0 else f"❌ exit={rc}"
     progress_finish_bot(name, rc)

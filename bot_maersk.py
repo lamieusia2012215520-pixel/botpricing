@@ -13,7 +13,7 @@ from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 import openpyxl
 import os, time, re, random, math, json, subprocess, urllib.request
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from remark_rules import build_subject_remark, charge_amount_to_usd, is_china_destination
 
 try:
@@ -2176,18 +2176,7 @@ def apply_9_golden_rules(danh_sach_chuyen):
             if (c["etd_dt"] - first_date).days <= 9 and (c["tt_days"] <= ngan_nhat_global + 10):
                 etd_dat_chuan.append(c)
 
-    format_str = ""
-    num = len(etd_dat_chuan)
-
-    if num == 1:
-        format_str = etd_dat_chuan[0]["etd_dt"].strftime("%d-%b")
-    elif num == 2:
-        format_str = f"{etd_dat_chuan[0]['etd_dt'].strftime('%d-%b')} & {etd_dat_chuan[1]['etd_dt'].strftime('%d-%b')}"
-    elif num >= 3:
-        day1 = etd_dat_chuan[0]["etd_dt"].strftime("%d")
-        day2 = etd_dat_chuan[1]["etd_dt"].strftime("%d")
-        day3_month = etd_dat_chuan[2]["etd_dt"].strftime("%d-%b")
-        format_str = f"{day1}, {day2}, {day3_month}"
+    format_str = format_etd_dates_excel([c["etd_dt"] for c in etd_dat_chuan[:3]])
 
     all_tt = [c["tt_days"] for c in etd_dat_chuan]
     tt_min, tt_max = min(all_tt), max(all_tt)

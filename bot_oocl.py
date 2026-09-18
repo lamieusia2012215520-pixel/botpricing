@@ -22,7 +22,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 import random
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from bot_runtime_utils import wait_for_terminal_enter
 from remark_rules import charge_amount_to_usd, get_manifest_code, is_china_destination
 
@@ -343,20 +343,7 @@ def parse_date_from_text(text):
     return None
 
 def format_etd_for_excel(etd_dates):
-    if not etd_dates:
-        return ""
-    dates = [d.date() if hasattr(d, 'date') else d for d in etd_dates]
-    fmt = [(d.day, d.strftime("%b")) for d in dates]
-    if len(fmt) == 1:
-        return f"{fmt[0][0]}-{fmt[0][1]}"
-    if len(fmt) == 2:
-        return f"{fmt[0][0]}-{fmt[0][1]} & {fmt[1][0]}-{fmt[1][1]}"
-    months = [f[1] for f in fmt]
-    if months[0] == months[1] == months[2]:
-        return f"{fmt[0][0]}, {fmt[1][0]}, {fmt[2][0]}-{fmt[2][1]}"
-    if months[0] == months[1]:
-        return f"{fmt[0][0]}, {fmt[1][0]}-{fmt[1][1]}, {fmt[2][0]}-{fmt[2][1]}"
-    return f"{fmt[0][0]}-{fmt[0][1]}, {fmt[1][0]}-{fmt[1][1]}, {fmt[2][0]}-{fmt[2][1]}"
+    return format_etd_dates_excel(etd_dates)
 
 def format_transit_for_excel(transit_list):
     if not transit_list:

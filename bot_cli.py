@@ -63,3 +63,77 @@ def parse_date_offset_days(default=7, env_key="DATE_OFFSET_DAYS", argv=None):
     value = max(0, value)
     os.environ[env_key] = str(value)
     return value
+
+
+def _to_date(item):
+    if item is None:
+        return None
+    if hasattr(item, "date"):
+        try:
+            return item.date()
+        except TypeError:
+            pass
+    if isinstance(item, date_type):
+        return item
+    if isinstance(item, dict):
+        for k in ("etd_dt", "etd", "etd_date", "date", "dt"):
+            val = item.get(k)
+            if val is not None:
+                d = _to_date(val)
+                if d:
+                    return d
+    if isinstance(item, str):
+        item_str = item.strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y", "%d %b %Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(item_str, fmt).date()
+            except Exception:
+                pass
+    return None
+
+
+def format_etd_dates_excel(dates_or_entries):
+    """
+    Format list of ETDs according to company standard:
+    - 1 date: '26-Sep'
+    - 2 dates: '26-Sep & 30-Sep' or '26-Sep & 2-Oct'
+    - 3 dates same month: '26, 28, 30-Sep'
+    - 3 dates across 2 months: '26, 30-Sep & 2-Oct' or '26-Sep & 2, 6-Oct'
+    - 3 dates across 3 months: '26-Sep, 2-Oct & 5-Nov'
+    """
+    if not dates_or_entries:
+        return ""
+    dates = []
+    for item in dates_or_entries:
+        d = _to_date(item)
+        if d:
+            dates.append(d)
+    if not dates:
+        return ""
+    ordered = sorted(dates)
+    if len(ordered) == 1:
+        return f"{ordered[0].day}-{ordered[0].strftime('%b')}"
+    if len(ordered) == 2:
+        return f"{ordered[0].day}-{ordered[0].strftime('%b')} & {ordered[1].day}-{ordered[1].strftime('%b')}"
+
+    groups = []
+    for dt in ordered:
+        key = (dt.year, dt.month)
+        if not groups or groups[-1][0] != key:
+            groups.append((key, [dt]))
+        else:
+            groups[-1][1].append(dt)
+
+    parts = []
+    for _, group_dates in groups:
+        month = group_dates[-1].strftime("%b")
+        if len(group_dates) == 1:
+            parts.append(f"{group_dates[0].day}-{month}")
+        else:
+            days = ", ".join(str(d.day) for d in group_dates)
+            parts.append(f"{days}-{month}")
+
+    if len(parts) == 1:
+        return parts[0]
+    return f"{', '.join(parts[:-1])} & {parts[-1]}"
+

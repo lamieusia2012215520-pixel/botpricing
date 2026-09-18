@@ -36,7 +36,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, WebDriverException
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from bot_runtime_utils import switch_to_live_window
 from hpl_logic import hpl_selected_port_matches, jwt_is_expired
 from remark_rules import build_subject_remark, is_china_destination
@@ -2185,18 +2185,7 @@ def apply_9_golden_rules(danh_sach_chuyen):
                     continue
                 etd_dat_chuan.append(c)
 
-    def _fmt_etd(dt):
-        return f"{dt.day}-{dt.strftime('%b')}"
-    num = len(etd_dat_chuan)
-    if num == 0:   str_etd = "N/A"
-    elif num == 1: str_etd = _fmt_etd(etd_dat_chuan[0]["etd_dt"])
-    elif num == 2: str_etd = (f"{_fmt_etd(etd_dat_chuan[0]['etd_dt'])} & "
-                              f"{_fmt_etd(etd_dat_chuan[1]['etd_dt'])}")
-    else:
-        d1 = str(etd_dat_chuan[0]["etd_dt"].day)
-        d2 = str(etd_dat_chuan[1]["etd_dt"].day)
-        d3 = _fmt_etd(etd_dat_chuan[2]["etd_dt"])
-        str_etd = f"{d1}, {d2}, {d3}"
+    str_etd = format_etd_dates_excel([c["etd_dt"] for c in etd_dat_chuan[:3]]) or "N/A"
 
     all_tt = [c["tt_days"] for c in etd_dat_chuan if c.get("tt_days") is not None]
     if not all_tt:
@@ -2548,18 +2537,9 @@ def parse_hpl_price(tab_idx, pod=""):
 # ===================================================================================
 def format_etd_tt(etd_list):
     """Rebuild str_etd, str_tt từ danh sách ETD đã lọc."""
-    def _fmt(dt):
-        return f"{dt.day}-{dt.strftime('%b')}"
     num = len(etd_list)
     if num == 0: return "N/A", "N/A"
-    elif num == 1: s = _fmt(etd_list[0]["etd_dt"])
-    elif num == 2:
-        s = (f"{_fmt(etd_list[0]['etd_dt'])} & "
-             f"{_fmt(etd_list[1]['etd_dt'])}")
-    else:
-        s = (f"{etd_list[0]['etd_dt'].day}, "
-             f"{etd_list[1]['etd_dt'].day}, "
-             f"{_fmt(etd_list[2]['etd_dt'])}")
+    s = format_etd_dates_excel([c["etd_dt"] for c in etd_list[:3]]) or "N/A"
     all_tt = [c["tt_days"] for c in etd_list]
     tt = str(min(all_tt)) if min(all_tt)==max(all_tt) else f"{min(all_tt)}-{max(all_tt)}"
     return s, tt

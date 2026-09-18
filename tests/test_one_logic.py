@@ -72,6 +72,29 @@ class OneLogicTests(unittest.TestCase):
         formula = excel_formula_from_parts(formula_parts["DRY 40H"])
         self.assertEqual(formula, "=6200-200+15")
 
+    def test_etd_dates_formatting(self):
+        from datetime import date, datetime
+        from bot_cli import format_etd_dates_excel
+
+        # User's exact case: 26, 30-Sep & 2-Oct
+        dates = [date(2026, 9, 26), date(2026, 9, 30), date(2026, 10, 2)]
+        self.assertEqual(format_etd_dates_excel(dates), "26, 30-Sep & 2-Oct")
+
+        # Same month: 26, 28, 30-Sep
+        self.assertEqual(format_etd_dates_excel([date(2026, 9, 26), date(2026, 9, 28), date(2026, 9, 30)]), "26, 28, 30-Sep")
+
+        # 1 in first month, 2 in second month: 26-Sep & 2, 6-Oct
+        self.assertEqual(format_etd_dates_excel([date(2026, 9, 26), date(2026, 10, 2), date(2026, 10, 6)]), "26-Sep & 2, 6-Oct")
+
+        # 3 different months: 26-Sep, 2-Oct & 5-Nov
+        self.assertEqual(format_etd_dates_excel([date(2026, 9, 26), date(2026, 10, 2), date(2026, 11, 5)]), "26-Sep, 2-Oct & 5-Nov")
+
+        # 2 dates: 26-Sep & 30-Sep
+        self.assertEqual(format_etd_dates_excel([date(2026, 9, 26), date(2026, 9, 30)]), "26-Sep & 30-Sep")
+
+        # 1 date: 26-Sep
+        self.assertEqual(format_etd_dates_excel([date(2026, 9, 26)]), "26-Sep")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-﻿"""
+"""
 EMC Price Checker - API-only mode for the new GreenX site.
 Uses direct GreenX HTTP endpoints; Selenium is kept only behind EMC_LEGACY_BROWSER=1.
 
@@ -31,7 +31,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 import openpyxl
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from emc_greenx_logic import (
     build_quote_detail_payload,
     hydrate_quote_with_detail,
@@ -399,17 +399,7 @@ def apply_9_golden_rules(danh_sach_chuyen):
                 etd_dat_chuan.append(c)
 
     # Format ETD string
-    def _fmt_etd(dt):
-        return f"{dt.day}-{dt.strftime('%b')}"
-    num = len(etd_dat_chuan)
-    if num == 0:   str_etd = "N/A"
-    elif num == 1: str_etd = _fmt_etd(etd_dat_chuan[0]["etd_dt"])
-    elif num == 2: str_etd = f"{_fmt_etd(etd_dat_chuan[0]['etd_dt'])} & {_fmt_etd(etd_dat_chuan[1]['etd_dt'])}"
-    else:
-        d1 = str(etd_dat_chuan[0]["etd_dt"].day)
-        d2 = str(etd_dat_chuan[1]["etd_dt"].day)
-        d3 = _fmt_etd(etd_dat_chuan[2]["etd_dt"])
-        str_etd = f"{d1}, {d2}, {d3}"
+    str_etd = format_etd_dates_excel([c["etd_dt"] for c in etd_dat_chuan[:3]]) or "N/A"
 
     all_tt = [c["tt_days"] for c in etd_dat_chuan]
     str_tt = f"{min(all_tt)}" if min(all_tt) == max(all_tt) else f"{min(all_tt)}-{max(all_tt)}"
@@ -1615,14 +1605,17 @@ def greenx_api_login(force=False):
         "Accept": "application/json, text/javascript, */*; q=0.01",
     })
     sess.get(GREENX_SIGNIN_URL, timeout=30)
+    login_url = f"{GREENX_BASE}/_gx/ActionDispatcher?xctl=checkpwd&tabkey=null"
+    login_headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": GREENX_SIGNIN_URL,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    login_data_payload = {"id": GREENX_LOGIN_ID, "pwd": GREENX_LOGIN_PASS}
     login_resp = sess.post(
-        f"{GREENX_BASE}/_gx/ActionDispatcher?xctl=checkpwd&tabkey=null",
-        data={"id": GREENX_LOGIN_ID, "pwd": GREENX_LOGIN_PASS},
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Referer": GREENX_SIGNIN_URL,
-            "X-Requested-With": "XMLHttpRequest",
-        },
+        login_url,
+        data=login_data_payload,
+        headers=login_headers,
         timeout=30,
     )
     try:
@@ -1630,8 +1623,42 @@ def greenx_api_login(force=False):
     except Exception:
         login_data = {}
     if not login_data.get("success"):
-        msg = login_data.get("message") or login_data.get("error") or login_resp.text[:120]
-        raise Exception(f"GREENX LOGIN FAILED: {msg}")
+        # GreenX returns LGNE0007 when the password is older than 90 days.
+        # The browser UI does not treat this as a hard login failure: it shows
+        # a reminder and, when the user chooses No, retries with useOldPwd=Y.
+        # Mirror that flow for the API bot so a password-age reminder does not
+        # make every EMC row fail.
+        login_code = str(
+            login_data.get("msg")
+            or login_data.get("errorCode")
+            or login_data.get("code")
+            or ""
+        ).strip().upper()
+        if login_code == "LGNE0007":
+            continue_payload = {**login_data_payload, "useOldPwd": "Y"}
+            continue_resp = sess.post(
+                login_url,
+                data=continue_payload,
+                headers=login_headers,
+                timeout=30,
+            )
+            try:
+                continue_data = continue_resp.json()
+            except Exception:
+                continue_data = {}
+            if continue_data.get("success"):
+                login_data = continue_data
+            else:
+                msg = (
+                    continue_data.get("message")
+                    or continue_data.get("msg")
+                    or continue_data.get("error")
+                    or continue_resp.text[:120]
+                )
+                raise Exception(f"GREENX LOGIN FAILED AFTER OLD-PASSWORD CONTINUE: {msg}")
+        else:
+            msg = login_data.get("message") or login_data.get("error") or login_data.get("msg") or login_resp.text[:120]
+            raise Exception(f"GREENX LOGIN FAILED: {msg}")
 
     home = sess.get(GREENX_HOME_URL, timeout=30).text
     m = re.search(r"GREENX_Quotes\?tabkey=([A-Fa-f0-9]+)", home)

@@ -21,7 +21,7 @@ import io
 import re
 import math
 from urllib.parse import urlparse
-from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import parse_date_offset_days, etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from bot_runtime_utils import switch_to_live_window
 from remark_rules import build_subject_remark, is_china_destination
 from cosco_elines_ui import (
@@ -50,6 +50,15 @@ driver_path = os.path.join(current_folder, "msedgedriver.exe")
 DATE_OFFSET_DAYS = parse_date_offset_days()
 COSCO_PORT_INPUT_WAIT_SECONDS = int(os.environ.get("COSCO_PORT_INPUT_WAIT_SECONDS", "15"))
 COSCO_PORT_DROPDOWN_WAIT_SECONDS = int(os.environ.get("COSCO_PORT_DROPDOWN_WAIT_SECONDS", "15"))
+COSCO_ELINES_PORT_INPUT_WAIT_SECONDS = max(
+    15, int(os.environ.get("COSCO_ELINES_PORT_INPUT_WAIT_SECONDS", "45"))
+)
+COSCO_ELINES_PORT_DROPDOWN_WAIT_SECONDS = max(
+    15, int(os.environ.get("COSCO_ELINES_PORT_DROPDOWN_WAIT_SECONDS", "20"))
+)
+COSCO_ELINES_PORT_MAX_ATTEMPTS = max(
+    3, int(os.environ.get("COSCO_ELINES_PORT_MAX_ATTEMPTS", "3"))
+)
 
 def _excel_formula_from_parts(parts):
     tokens = []
@@ -327,7 +336,6 @@ def _clear_cosco_session(browser, reason=""):
     print(f"   [COSCO] Logout/clear session do: {reason}")
     clear_urls = [
         "https://elines.coscoshipping.com/ebusiness/",
-        "https://synconhub.coscoshipping.com/spot",
         "https://exiamfw.lines.coscoshipping.com/",
     ]
     for url in clear_urls:
@@ -643,18 +651,12 @@ def _do_keycloak_login(driver, label):
 def login_cosco(driver):
     print("\n--- BẮT ĐẦU ĐĂNG NHẬP COSCO ---")
 
-    # Mở 2 tab như yêu cầu
+    # COSCO hiện chỉ dùng E-Lines; không mở/đăng nhập Synconhub nữa.
     elines_tab = _open_or_focus_tab(
         driver,
         "elines.coscoshipping.com",
         "https://elines.coscoshipping.com/ebusiness/",
         "Elines",
-    )
-    synconhub_tab = _open_or_focus_tab(
-        driver,
-        "synconhub.coscoshipping.com",
-        "https://synconhub.coscoshipping.com/",
-        "Synconhub",
     )
 
     # ==========================================
@@ -753,84 +755,7 @@ def login_cosco(driver):
             pass
         time.sleep(2)
 
-    # ==========================================
-    # PHASE 2: SYNCONHUB (Đã fix lỗi đồng bộ SSO)
-    # ==========================================
-    print("2. Đang xử lý Synconhub...")
-    synconhub_tab = _ensure_cosco_tab(
-        driver,
-        synconhub_tab,
-        "synconhub.coscoshipping.com",
-        "https://synconhub.coscoshipping.com/spot",
-        "Synconhub",
-    )
-    driver.get("https://synconhub.coscoshipping.com/spot")
-    try:
-        WebDriverWait(driver, 8).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
-        )
-    except Exception:
-        pass
-
-    spot_loaded = ("synconhub.coscoshipping.com/spot" in (driver.current_url or "").lower()
-                   and "redirect=" not in (driver.current_url or ""))
-                   
-    if spot_loaded:
-        print("   ✅ Synconhub: session còn hiệu lực.")
-    else:
-        if _click_text(driver, "button", "Allow All", timeout=3):
-            print("   [Synconhub] đã bấm Allow All.")
-            time.sleep(1)
-
-        print("   [Synconhub] Đang kích hoạt đồng bộ SSO từ Elines...")
-        
-        # Bơm JS để ép click nút Sign In/Up (Chắc chắn dính)
-        driver.execute_script("""
-            let els = document.querySelectorAll('div, a, span');
-            for(let e of els) {
-                let txt = (e.innerText || "").trim();
-                if((txt === 'Sign In/Up' || txt === 'Login' || txt === 'Sign In') && e.offsetParent !== null) {
-                    e.click();
-                    break;
-                }
-            }
-        """)
-        
-        # Chờ hệ thống chuyển hướng hoặc tự văng qua Keycloak
-        time.sleep(3)
-        
-        # (Phòng hờ) Nếu web có form đòi email thay vì tự nhảy
-        _fill_input_by_placeholder(driver, "e-mail", COSCO_EMAIL, css_class="el-input__inner", timeout=2)
-        _fill_input_by_placeholder(driver, "email", COSCO_EMAIL, timeout=1)
-        _click_text(driver, "button", "Next", timeout=2)
-
-        # Chờ web hoàn tất quá trình nhận Cookie SSO (tối đa 15s)
-        print("   [Synconhub] Chờ hệ thống xác thực...")
-        try:
-            WebDriverWait(driver, 15).until(
-                lambda d: "synconhub.coscoshipping.com/spot" in (d.current_url or "").lower() and "redirect=" not in (d.current_url or "").lower()
-            )
-        except Exception:
-            pass
-
-        # Ép trình duyệt load lại thẳng vào trang spot để kiểm tra lần cuối
-        driver.get("https://synconhub.coscoshipping.com/spot")
-        try:
-            WebDriverWait(driver, 5).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-        except Exception:
-            pass
-            
-        final_loaded = ("synconhub.coscoshipping.com/spot" in (driver.current_url or "").lower()
-                        and "redirect=" not in (driver.current_url or ""))
-                        
-        if final_loaded:
-            print("   ✅ Synconhub login OK (Đã đồng bộ SSO).")
-        else:
-            print(f"   ⚠️ Synconhub vẫn kẹt ở URL = {driver.current_url[:100]}")
-
-    print("--- HOÀN TẤT ĐĂNG NHẬP COSCO ---\n")
+    print("--- HOÀN TẤT ĐĂNG NHẬP COSCO (CHỈ E-LINES) ---\n")
 
 EXCHANGE_RATE_CACHE = {} # Biến nhớ tỷ giá toàn cục
 
@@ -1128,6 +1053,52 @@ def _cosco_port_query_candidates(clean_port_name, country):
             candidates.append(f"{alias} {country_upper}".strip())
     return list(dict.fromkeys(candidates))
 
+
+def _elines_port_query_candidates(clean_port_name):
+    """Queries used by the new E-Lines autocomplete.
+
+    NHAVA SHEVA is accepted by E-Lines under its canonical display name.  Do
+    not replace it with a guessed alias or UNLOCODE; the slow part is the
+    autocomplete response, so the caller waits for it instead.
+    """
+    base = re.sub(r"\s+", " ", str(clean_port_name or "").strip().upper())
+    if base == "NHAVA SHEVA":
+        return [base]
+    candidates = list(_cosco_port_aliases(base))
+    return list(dict.fromkeys([x for x in candidates if x]))
+
+
+def _elines_visible_port_options():
+    """Return visible options across both old and new Element UI dropdown DOMs."""
+    selectors = (
+        "div.el-autocomplete-suggestion:not([style*='display: none']) li",
+        "div.el-autocomplete-suggestion li",
+        "ul.el-autocomplete-suggestion__wrap li",
+        "li.el-autocomplete-suggestion__item",
+        "div.el-select-dropdown:not([style*='display: none']) li",
+        "li.el-select-dropdown__item",
+        "[role='option']",
+    )
+    result = []
+    seen = set()
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for element in elements:
+            try:
+                if not element.is_displayed() or not (element.text or "").strip():
+                    continue
+                key = ((element.text or "").strip().upper(), element.tag_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(element)
+            except Exception:
+                continue
+    return result
+
 def _cosco_text_matches_port(txt, clean_port_name):
     text = re.sub(r"\s+", " ", str(txt or "").strip().upper())
     text_compact = _cosco_compact_text(text)
@@ -1215,13 +1186,21 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
     
     clean_port_name = port_name.split(',')[0].strip().upper()
     country_upper = str(country or "").upper()
-    query_candidates = _cosco_port_aliases(clean_port_name) if is_elines else _cosco_port_query_candidates(clean_port_name, country_upper)
+    query_candidates = _elines_port_query_candidates(clean_port_name) if is_elines else _cosco_port_query_candidates(clean_port_name, country_upper)
 
-    max_attempts = max(5, len(query_candidates) + 1)
+    max_attempts = (
+        COSCO_ELINES_PORT_MAX_ATTEMPTS
+        if is_elines
+        else max(5, len(query_candidates) + 1)
+    )
     for attempt in range(max_attempts): 
         try:
             # 1. Tìm ô nhập liệu (Dùng WebDriverWait để không bị rớt do load chậm)
-            input_wait = max(COSCO_PORT_INPUT_WAIT_SECONDS, 20 if is_elines else 10)
+            input_wait = (
+                COSCO_ELINES_PORT_INPUT_WAIT_SECONDS
+                if is_elines
+                else max(COSCO_PORT_INPUT_WAIT_SECONDS, 10)
+            )
             inp = WebDriverWait(driver, input_wait).until(lambda d: next((e for e in d.find_elements(By.XPATH, xpath) if e.is_displayed()), None))
             if not inp: raise Exception("Không tìm thấy ô!")
             
@@ -1233,7 +1212,11 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
                 sys_name != "Synconhub"
                 and not (clean_port_name == "NANSHA" and "CANTON" in curr_val)
                 and (not is_elines or "," in curr_val)
-                and (not country_upper or _cosco_text_has_country(curr_val, country_upper))
+                and (
+                    not country_upper
+                    or _cosco_text_has_country(curr_val, country_upper)
+                    or (is_elines and _cosco_text_matches_port(curr_val, clean_port_name))
+                )
                 and _cosco_text_matches_port(curr_val, clean_port_name)
             ):
                 print(f"        -> Đã có sẵn CHUẨN: {curr_val} -> ĐI TIẾP!")
@@ -1264,13 +1247,17 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
             target_strict = f"{clean_port_name}," 
             target_semi = f"{clean_port_name} ,"
             
-            dropdown_wait = max(COSCO_PORT_DROPDOWN_WAIT_SECONDS, 20 if is_elines else 10)
+            dropdown_wait = (
+                COSCO_ELINES_PORT_DROPDOWN_WAIT_SECONDS
+                if is_elines
+                else max(COSCO_PORT_DROPDOWN_WAIT_SECONDS, 10)
+            )
             timeout = time.time() + dropdown_wait
             match = None
             match_score = 999
             debug_options = []
             while time.time() < timeout:
-                opts = driver.find_elements(By.CSS_SELECTOR, css_sel)
+                opts = _elines_visible_port_options() if is_elines else driver.find_elements(By.CSS_SELECTOR, css_sel)
                 if not opts:
                     try:
                         inp.send_keys(Keys.ARROW_DOWN)
@@ -1282,7 +1269,12 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
                     txt = o.text.strip().upper()
                     if txt and txt not in debug_options:
                         debug_options.append(txt[:120])
-                    if country_upper and not _cosco_text_has_country(txt, country_upper):
+                    country_matches = (
+                        not country_upper
+                        or _cosco_text_has_country(txt, country_upper)
+                        or (is_elines and _cosco_text_matches_port(txt, clean_port_name))
+                    )
+                    if not country_matches:
                         continue
                     
                     # LUẬT LỌC KHẮT KHE: Bắt buộc phần đầu phải khớp hoàn toàn tới dấu phẩy
@@ -1305,7 +1297,38 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
             
             if match:
                 final_text = match.text.strip()
-                driver.execute_script("arguments[0].click();", match)
+                try:
+                    driver.execute_script("arguments[0].click();", match)
+                except Exception:
+                    match.click()
+                if is_elines:
+                    # React/Element UI can render the option click before it
+                    # commits the selected value. Verify it before moving on;
+                    # otherwise retry the same route with the next query.
+                    selected = False
+                    try:
+                        WebDriverWait(driver, 4, poll_frequency=0.15).until(
+                            lambda d: _cosco_text_matches_port(
+                                d.execute_script("return arguments[0].value || '';", inp),
+                                clean_port_name,
+                            )
+                        )
+                        selected = True
+                    except Exception:
+                        try:
+                            inp.send_keys(Keys.ARROW_DOWN, Keys.ENTER)
+                            WebDriverWait(driver, 2, poll_frequency=0.15).until(
+                                lambda d: _cosco_text_matches_port(
+                                    d.execute_script("return arguments[0].value || '';", inp),
+                                    clean_port_name,
+                                )
+                            )
+                            selected = True
+                        except Exception:
+                            pass
+                    if not selected:
+                        print("        -> [Elines] Option đã click nhưng input chưa nhận; retry query.")
+                        continue
                 print(f"        -> Đã chốt từ list: {final_text}")
                 return 
             
@@ -1314,6 +1337,10 @@ def select_port_smart(xpath, port_name, country, sys_name, is_elines=False):
             raise Exception("Không tìm thấy option phù hợp chuẩn xác trong list")
             
         except Exception as e:
+            print(
+                f"        -> [{sys_name}] Chưa chốt được {clean_port_name} "
+                f"(lần {attempt + 1}/{max_attempts}); chờ web và thử lại."
+            )
             try:
                 driver.execute_script("arguments[0].blur();", inp)
             except Exception:
@@ -3113,10 +3140,10 @@ except Exception as e:
 failed_rows = []  # Mảng lưu lại các dòng bị báo lỗi NO SERVICE để chạy phiên 2
 
 # ---------------------------------------------------------
-# PHIÊN CHẠY 1: CHẠY ĐỒNG THỜI SYNCONHUB & ELINES
+# PHIÊN CHẠY 1: CHỈ CHẠY E-LINES
 # ---------------------------------------------------------
 print(f"\n{'='*52}")
-print("▶️ BẮT ĐẦU PHIÊN CHẠY 1 (SYNCONHUB + ELINES)")
+print("▶️ BẮT ĐẦU PHIÊN CHẠY 1 (CHỈ E-LINES)")
 print(f"{'='*52}")
 
 login_cosco(driver) # <--- THÊM DÒNG NÀY VÀO ĐÂY
@@ -3189,43 +3216,16 @@ for row in danh_sach_dong:
     if cosco_has_unsupported_port(pol, pod):
         print(f"\n{'='*52}")
         print(f"⏭️ COSCO bỏ qua route unsupported: {pol} -> {pod} (Row {row})")
-        print("   Lý do: PARADIP không có trong port list COSCO, bỏ qua cả Synconhub và Elines.")
+        print("   Lý do: PARADIP không có trong port list COSCO, bỏ qua route E-Lines.")
         clear_cosco_quote_fields(sheet, row)
         sheet.cell(row=row, column=13).value = "NO SERVICE / SOLD OUT"
         wb.save(EXCEL_FILE); print(f"   [OK] Đã lưu dữ liệu dòng {row} thành công!")
         continue
 
     print(f"\n{'='*52}")
-    print(f"🚀 SO SÁNH GIÁ (LẦN 1): {pol} -> {pod} (Row {row})")
+    print(f"🚀 CHECK GIÁ E-LINES (LẦN 1): {pol} -> {pod} (Row {row})")
     
-    # Kiểm tra nếu POD thuộc AUSTRALIA thì bỏ qua Synconhub
-    if pod_country and "AUSTRALIA" in pod_country.upper():
-        print("   [1] Synconhub... ⏩ BỎ QUA (Tuyến Úc chỉ check Elines)")
-        res_s = None
-    else:
-        print("   [1] Synconhub...")
-        focus_tab_by_url("synconhub.coscoshipping.com", "https://synconhub.coscoshipping.com/spot")
-        reload_synconhub_base()
-        time.sleep(1)
-        if "login" in (driver.current_url or "").lower() or "auth" in (driver.current_url or "").lower():
-            print("   ⚠️ Phát hiện Session Synconhub hết hạn! Tiến hành đăng nhập lại...")
-            login_cosco(driver)
-            focus_tab_by_url("synconhub.coscoshipping.com", "https://synconhub.coscoshipping.com/spot")
-            reload_synconhub_base()
-        res_s = run_synconhub(pol, pod, pod_country)
-        if res_s is None:
-            print("   [1B] Synconhub fail/lag -> clean reload và retry 1 lần...")
-            focus_tab_by_url("synconhub.coscoshipping.com", "https://synconhub.coscoshipping.com/spot")
-            reload_synconhub_base()
-            time.sleep(1)
-            res_s = run_synconhub(pol, pod, pod_country)
-        if res_s is None and pod_country and "CHINA" in pod_country.upper():
-            print("   [1B] Synconhub retry for China route after clean reload...")
-            focus_tab_by_url("synconhub.coscoshipping.com", "https://synconhub.coscoshipping.com/spot")
-            reload_synconhub_base()
-            res_s = run_synconhub(pol, pod, pod_country)
-
-    print("   [2] Elines...")
+    print("   [1] Elines...")
     focus_tab_by_url("elines.coscoshipping.com", ELINES_BOOKING_URL)
     time.sleep(1)
     if "login" in (driver.current_url or "").lower() or "auth" in (driver.current_url or "").lower():
@@ -3238,21 +3238,8 @@ for row in danh_sach_dong:
     chot_deal = None
     source = ""
 
-    def get_compare_price(res):
-        if res is None or is_no_service_result(res): return float('inf')
-        p20 = res['rates']['20GP']
-        p40 = res['rates']['40GP']
-        if p20 is not None: return p20
-        if p40 is not None: return p40
-        return float('inf')
-
-    price_s = get_compare_price(res_s)
-    price_e = get_compare_price(res_e)
-
-    if price_s == float('inf') and price_e == float('inf'):
+    if res_e is None or is_no_service_result(res_e):
         chot_deal = None
-    elif price_s <= price_e:
-        chot_deal, source = res_s, "SYNCONHUB"
     else:
         chot_deal, source = res_e, "ELINES"
 
@@ -3290,7 +3277,7 @@ for row in danh_sach_dong:
         sheet.cell(row=row, column=14).value = ft_value
         # --- KẾT THÚC THÊM ---
     else:
-        print("   ❌ Cả 2 hệ thống đều móm ở Lần 1!")
+        print("   ❌ E-Lines không có giá ở Lần 1!")
         clear_cosco_quote_fields(sheet, row)
         sheet.cell(row=row, column=13).value = "NO SERVICE / SOLD OUT"
         if elines_no_products:

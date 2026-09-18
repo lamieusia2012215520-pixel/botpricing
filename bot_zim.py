@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 import urllib.request
 
 import openpyxl
-from bot_cli import etd_within_max, max_etd_date, max_etd_date_only
+from bot_cli import etd_within_max, max_etd_date, max_etd_date_only, format_etd_dates_excel
 from openpyxl.styles import Alignment
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
@@ -670,21 +670,7 @@ def fmt_date_short(dt):
 
 
 def format_etd_text(entries):
-    if not entries:
-        return ""
-    fmt = [(e["etd_dt"].day, e["etd_dt"].strftime("%b")) for e in entries]
-    if len(fmt) == 1:
-        return f"{fmt[0][0]}-{fmt[0][1]}"
-    if len(fmt) == 2:
-        return f"{fmt[0][0]}-{fmt[0][1]} & {fmt[1][0]}-{fmt[1][1]}"
-    months = [m for _, m in fmt]
-    if months[0] == months[1] == months[2]:
-        return f"{fmt[0][0]}, {fmt[1][0]}, {fmt[2][0]}-{fmt[2][1]}"
-    if months[0] == months[1]:
-        return f"{fmt[0][0]}, {fmt[1][0]}-{fmt[1][1]} & {fmt[2][0]}-{fmt[2][1]}"
-    if months[1] == months[2]:
-        return f"{fmt[0][0]}-{fmt[0][1]}, {fmt[1][0]} & {fmt[2][0]}-{fmt[2][1]}"
-    return f"{fmt[0][0]}-{fmt[0][1]}, {fmt[1][0]}-{fmt[1][1]} & {fmt[2][0]}-{fmt[2][1]}"
+    return format_etd_dates_excel([e["etd_dt"] for e in entries])
 
 
 def format_tt_text(entries):
